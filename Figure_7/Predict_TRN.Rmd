@@ -1,0 +1,1265 @@
+---
+title: "TRN Inference from Chromatin Data"
+output: html_notebook
+---
+
+```{r}
+library(ggnetwork)
+library(igraph)
+library(intergraph)
+library(ggnewscale)
+library(ggrepel)
+```
+
+
+## Load the master dataframe
+
+```{r}
+master.df <- readRDS("/Users/kmoyung/Desktop/master_diff_length_corrected.RDS")
+```
+
+## Fit linear regression model (from Regression_Analysis.Rmd)
+
+```{r}
+library(ggpubr)
+
+# Color scale (low and high)
+colscale <- c("#264b96", "#bf212f")
+
+# Expression threshold
+e <- 0.5
+# Significance threshold
+e_p <- 0.05
+
+# Label points based on the laplacian cutoff
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC >= e ~ "Up + Chrom",
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC <= -e ~ "Down + Chrom", 
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & between(Microarray_FC, -e, e) ~ "Chrom", 
+    TRUE ~ "Other"
+  ))
+
+# Filter out mutants with no significant expression+chromatin changes; we call these "unresponsive" mutants
+sub_master.df <- master.df %>%
+  group_by(Mutant) %>%
+  filter(!all(Point_Label %in% c("Other", "Chrom")))
+
+direct_indirect.df <- sub_master.df %>%
+      group_by(Mutant) %>%
+      filter(Point_Label %in% c("Up + Chrom", "Down + Chrom", "Chrom"))
+
+netseq.df <- read.csv("/Users/kmoyung/Downloads/gene_net_seq.csv")
+
+# Map ORF name to gene alias
+netseq.df$Locus <- gene.df[match(netseq.df$gene, gene.df$name), "alias"]
+
+# Merge with NET-seq data
+direct_indirect.df <- merge(direct_indirect.df, netseq.df, by = "Locus")
+
+# Fit the model
+final_fit <- lm(Microarray_FC ~ Subnuc_Norm + Nuc_Norm + Nuc_Entropy_Change + Term_Nuc_Norm + Promnuc_Norm + NET_seq, data = direct_indirect.df)
+
+direct_indirect.df$Predicted_Microarray <- predict.lm(final_fit, newdata = direct_indirect.df)
+
+sig_chrom.df <- direct_indirect.df
+```
+
+## Predict TRN for a single mutant
+
+```{r}
+mut <- c("BAS1")
+sub_mut.df <- subset(sig_chrom.df, Mutant %in% mut)
+
+# Classify direct effects with motif + significant TF occupancy decrease
+cutoff <- -0.5
+sub_mut.df$DirectBinding <- ifelse(sub_mut.df$hasMotif == 1 & sub_mut.df$Subnuc_Norm <= cutoff, 1, 0)
+# sub_mut.df$DirectBinding <- ifelse(sub_mut.df$hasMotif == 1 & sub_mut.df$TF_Change <= cutoff, 1, 0)
+
+sub_mut.df[, c("Mutant", "Locus", "Microarray_FC", "Predicted_Microarray", "hasMotif", "DirectBinding", "True_Direct_Interaction", "Subnuc_Norm", "TF_Change")] 
+```
+Build network
+
+```{r}
+## Inferred TRN ##
+
+# Change format for the mutant TF
+chrom_mut.df <- sub_mut.df
+chrom_mut.df$Mutant <- paste0(tolower(chrom_mut.df$Mutant), "\u0394")
+# Check if a target is also a mutant; if so, change the formatting of the name
+chrom_mut.df$Locus <- ifelse(chrom_mut.df$Locus %in% mutants$V1, paste0(tolower(chrom_mut.df$Locus), "\u0394"), chrom_mut.df$Locus)
+
+# Label edge type depending on direct/indirect effect
+chrom_mut.df$edgetype <- as.factor(ifelse(chrom_mut.df$DirectBinding == 1, 1, 2))
+
+# Label edge color based on up/downregulation
+chrom_mut.df$pred_txn <- as.factor(ifelse(chrom_mut.df$Predicted_Microarray > 0, "Up", "Down"))
+chrom_mut.df$txn <- as.factor(ifelse(chrom_mut.df$Microarray_FC > 0, "Up", "Down"))
+
+# Label edge color based on gain/loss of TF occupancy
+chrom_mut.df$tfchange <- as.factor(ifelse(chrom_mut.df$TF_Change > 0, "Gain", "Loss"))
+
+# Label edge color based on gain/loss of nucleosome occupancy
+chrom_mut.df$nucchange <- as.factor(ifelse(chrom_mut.df$Nuc_Norm > 0, "Gain", "Loss"))
+
+chrom_mut.df$Network <- "Chromatin"
+
+set.seed(999)
+net <- graph_from_data_frame(chrom_mut.df[, c("Mutant", "Locus", "Predicted_Microarray", "DirectBinding", "edgetype", "pred_txn", "txn", "Microarray_FC", "tfchange", "nucchange")], directed = T)
+# net <- ggnetwork(asNetwork(net), arrow.gap = 0.085)
+net <- ggnetwork(asNetwork(net), arrow.gap = 0.105)
+
+## Expression-based TRN ##
+# Try various cutoffs
+e <- 0.85
+expr_mut.df <- subset(master.df, Mutant %in% mut & (Microarray_FC > e | Microarray_FC < -e))
+
+# Change format for the mutant TF
+expr_mut.df$Mutant <- paste0(tolower(expr_mut.df$Mutant), "\u0394")
+# Check if a target is also a mutant; if so, change the formatting of the name
+expr_mut.df$Locus <- ifelse(expr_mut.df$Locus %in% mutants$V1, paste0(tolower(expr_mut.df$Locus), "\u0394"), expr_mut.df$Locus)
+expr_mut.df$txn <- as.factor(ifelse(expr_mut.df$Microarray_FC > 0, "Up", "Down"))
+
+expr_mut.df$Network <- "Expression"
+
+set.seed(999)
+expr_net <- graph_from_data_frame(expr_mut.df[, c("Mutant", "Locus", "Microarray_FC", "txn")], directed = T)
+# expr_net <- ggnetwork(asNetwork(expr_net), arrow.gap = 0.085)
+expr_net <- ggnetwork(asNetwork(expr_net), arrow.gap = 0.105)
+
+# Label nodes if they also exist in the chromatin TRN
+expr_net$Overlap_TRN <- ifelse(expr_net$vertex.names %in% net$vertex.names, "Overlap", "No_Overlap")
+# Label the main node
+expr_net$Overlap_TRN <- ifelse(grepl("\u0394", expr_net$vertex.names), "Mutant", expr_net$Overlap_TRN)
+
+orig_trn <- ggplot(expr_net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+  geom_edges(data = subset(expr_net, txn == "Up"), aes(color = txn), arrow = arrow(length = unit(10, "pt"), type = "closed"), linetype = "dashed", linewidth = 1.05) +
+  geom_edges(data = subset(expr_net, txn == "Down"), aes(color = txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90), linetype = "dashed", linewidth = 1.05) +
+  scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96")) + 
+  # geom_nodes(data = subset(expr_net, Overlap_TRN == "No_Overlap"), color = "grey85", size = 16) +
+  # geom_nodes(data = subset(expr_net, Overlap_TRN == "No_Overlap"), color = "grey85", size = 20, alpha = 0.4) +
+  new_scale_color() + 
+  # geom_nodes(data = subset(expr_net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 16) + 
+  # geom_nodes(data = subset(expr_net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 20, alpha = 0.4) + 
+  # geom_nodes(data = subset(expr_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 16) + 
+  # geom_nodes(data = subset(expr_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 20, alpha = 0.4) + 
+  geom_nodes(data = subset(expr_net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), color = "black", size = 17) + 
+  geom_nodes(data = subset(expr_net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), aes(color = Overlap_TRN), size = 16) +
+  scale_color_manual(values = c("No_Overlap" = "grey85", "Overlap" = "#FAC898", "Mutant" = "#C3B1E1"), 
+                     labels = c("Mutant", "No Overlap", "Overlap")) + 
+  geom_nodetext(aes(label = vertex.names), color = "black", fontface = "bold.italic") + 
+  theme_blank() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+        legend.position = "none") + 
+  labs(title = "Expression TRN") + 
+  coord_cartesian(clip = "off")
+print(orig_trn)
+
+# Label nodes if they also exist in the chromatin TRN
+net$Overlap_TRN <- ifelse(net$vertex.names %in% expr_net$vertex.names, "Overlap", "No_Overlap")
+# Label the main node
+net$Overlap_TRN <- ifelse(grepl("\u0394", net$vertex.names), "Mutant", net$Overlap_TRN)
+
+# Plot a TRN with just overlapping nodes between expression and chromatin first
+set.seed(999)
+overlap_chrom_mut.df <- subset(chrom_mut.df, Locus %in% subset(net, Overlap_TRN == "Overlap")$vertex.names)
+overlap_net <- graph_from_data_frame(overlap_chrom_mut.df[, c("Mutant", "Locus", "Predicted_Microarray", "DirectBinding", "edgetype", "pred_txn", "txn", "Microarray_FC", "tfchange", "nucchange")], directed = T)
+# overlap_net <- ggnetwork(asNetwork(overlap_net), arrow.gap = 0.085)
+overlap_net <- ggnetwork(asNetwork(overlap_net), arrow.gap = 0.105)
+
+overlap_net$Overlap_TRN <- ifelse(overlap_net$vertex.names %in% expr_net$vertex.names, "Overlap", "No_Overlap")
+# Label the main node
+overlap_net$Overlap_TRN <- ifelse(grepl("\u0394", overlap_net$vertex.names), "Mutant", overlap_net$Overlap_TRN)
+
+# overlap_inferred_trn <- ggplot(overlap_net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+#   geom_edges(data = subset(overlap_net, pred_txn == "Up"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(10, "pt"), type = "closed"), linewidth = 1.05) +
+#   geom_edges(data = subset(overlap_net, pred_txn == "Down"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90), linewidth = 1.05) +
+#   scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96")) + 
+#   # geom_nodes(data = subset(net, Overlap_TRN == "No_Overlap"), color = "#77dd77", size = 16) +
+#   # geom_nodes(data = subset(net, Overlap_TRN == "No_Overlap"), color = "#77dd77", size = 20, alpha = 0.4) +
+#   new_scale_color() + 
+#   geom_nodes(data = subset(overlap_net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 16) + 
+#   geom_nodes(data = subset(overlap_net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 20, alpha = 0.4) +
+#   geom_nodes(data = subset(overlap_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 16) + 
+#   geom_nodes(data = subset(overlap_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 20, alpha = 0.4) + 
+#   geom_nodetext(aes(label = vertex.names), color = "black", fontface = "bold.italic") + 
+#   theme_blank() + 
+#   theme(plot.title = element_text(hjust = 0.5), 
+#         legend.position = "none") + 
+#   labs(title = "Chromatin TRN") + 
+#   coord_cartesian(clip = "off")
+# print(overlap_inferred_trn)
+
+inferred_trn <- ggplot(net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+  geom_edges(data = subset(net, pred_txn == "Up"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(10, "pt"), type = "closed"), linewidth = 1.05, show.legend = F) +
+  geom_edges(data = subset(net, pred_txn == "Down"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90), linewidth = 1.05, show.legend = F) +
+  geom_line(data = net, aes(linetype = edgetype, color = pred_txn), linewidth = 1.05) +
+  scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96"), drop = F) + 
+  guides(color = guide_legend(title = "", drop = F)) + 
+  new_scale_color() + 
+  geom_nodes(data = subset(net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), color = "black", size = 17) + 
+  geom_nodes(data = subset(net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), aes(color = Overlap_TRN), size = 16) + 
+  scale_color_manual(values = c("No_Overlap" = "grey85", "Overlap" = "#FAC898", "Mutant" = "#C3B1E1"), 
+                     labels = c("Mutant", "Chromatin\nOR\nExpression", "Chromatin\nAND\nExpression")) + 
+  guides(color = guide_legend(override.aes = list(size = 10))) + 
+  geom_nodetext(aes(label = vertex.names), color = "black", fontface = "bold.italic") + 
+  theme_blank() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+        legend.position = "bottom", 
+        legend.text = element_text(size = 12), 
+        legend.key.width = unit(2.5, "line")) + 
+  scale_linetype_manual(labels = c("Direct w/\nChromatin Evidence", "Indirect"), values = c("solid", "dashed"), drop = F) + 
+  labs(title = "Chromatin TRN", color = "", linetype = "") + 
+  coord_cartesian(clip = "off")
+print(inferred_trn)
+
+```
+
+## Plot TRN in the same style as ggnetwork but with the node positions based on nucleosome/TF scores
+
+```{r}
+## Inferred TRN ##
+
+# Change format for the mutant TF
+chrom_mut.df <- sub_mut.df
+chrom_mut.df$Mutant <- paste0(tolower(chrom_mut.df$Mutant), "\u0394")
+# Check if a target is also a mutant; if so, change the formatting of the name
+chrom_mut.df$Locus <- ifelse(chrom_mut.df$Locus %in% mutants$V1, paste0(tolower(chrom_mut.df$Locus), "\u0394"), chrom_mut.df$Locus)
+
+# Label edge type depending on direct/indirect effect
+chrom_mut.df$edgetype <- as.factor(ifelse(chrom_mut.df$DirectBinding == 1, 1, 2))
+
+# Label edge color based on up/downregulation
+chrom_mut.df$pred_txn <- as.factor(ifelse(chrom_mut.df$Predicted_Microarray > 0, "Up", "Down"))
+chrom_mut.df$txn <- as.factor(ifelse(chrom_mut.df$Microarray_FC > 0, "Up", "Down"))
+
+# Label edge color based on gain/loss of TF occupancy
+chrom_mut.df$tfchange <- as.factor(ifelse(chrom_mut.df$TF_Change > 0, "Gain", "Loss"))
+
+# Label edge color based on gain/loss of nucleosome occupancy
+chrom_mut.df$nucchange <- as.factor(ifelse(chrom_mut.df$Nuc_Norm > 0, "Gain", "Loss"))
+
+chrom_mut.df$Network <- "Chromatin"
+
+# KEY: Compute x and y coordinates based on TF and Nuc score
+tf_x <- (chrom_mut.df$Subnuc_Norm * final_fit$coefficients[2])
+# nuc_y <- (chrom_mut.df$Nuc_Norm * fit$coefficients[3]) + 
+#   (chrom_mut.df$Nuc_Entropy * fit$coefficients[4])
+nuc_y <- (-1 * (chrom_mut.df$Nuc_Norm * final_fit$coefficients[3]))
+net_coords <- cbind(tf_x, nuc_y)
+
+if (length(mut) == 1) {
+  net_coords <- rbind(c(0, 0), net_coords)
+}
+
+set.seed(999)
+igraph_net <- graph_from_data_frame(chrom_mut.df[, c("Mutant", "Locus", "Predicted_Microarray", "DirectBinding", "edgetype", "pred_txn", "txn", "Microarray_FC", "tfchange", "nucchange")], directed = T)
+# net <- ggnetwork(asNetwork(net), arrow.gap = 0.085, layout = net_coords)
+net <- ggnetwork(asNetwork(igraph_net), arrow.gap = 0.105, layout = net_coords)
+
+# Label nodes if they also exist in the chromatin TRN
+net$Overlap_TRN <- ifelse(net$vertex.names %in% expr_net$vertex.names, "Overlap", "No_Overlap")
+# Label the main node
+net$Overlap_TRN <- ifelse(grepl("\u0394", net$vertex.names), "Mutant", net$Overlap_TRN)
+
+# Compute the origin position
+mut_x <- net$x[1]
+mut_y <- net$y[1]
+# pad <- 0.75 # Padding for plot area
+pad <- 1 # Padding for plot area
+
+mech_trn <- ggplot(net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+  # Plot guidelines 
+  geom_hline(yintercept = mut_y, lty = 1, color = "grey75", alpha = 1) +
+  geom_vline(xintercept = mut_x, lty = 1, color = "grey75", alpha = 1) +
+  geom_edges(data = subset(net, pred_txn == "Up"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(10, "pt"), type = "closed"), linewidth = 1.05) +
+  geom_edges(data = subset(net, pred_txn == "Down"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90), linewidth = 1.05) +
+  scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96")) + 
+  # geom_nodes(data = subset(net, Overlap_TRN == "No_Overlap"), color = "grey85", size = 16) +
+  # geom_nodes(data = subset(net, Overlap_TRN == "No_Overlap"), color = "grey85", size = 20, alpha = 0.4) +
+  new_scale_color() + 
+  # geom_nodes(data = subset(net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 16) + 
+  # geom_nodes(data = subset(net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 20, alpha = 0.4) +
+  # geom_nodes(data = subset(net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 16) + 
+  # geom_nodes(data = subset(net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 20, alpha = 0.4) + 
+  geom_nodes(data = subset(net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), color = "black", size = 17) + 
+  geom_nodes(data = subset(net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), aes(color = Overlap_TRN), size = 16) + 
+  scale_color_manual(values = c("No_Overlap" = "grey85", "Overlap" = "#FAC898", "Mutant" = "#C3B1E1"), 
+                     labels = c("Mutant", "No Overlap", "Overlap")) +
+  geom_nodetext(data = subset(net, Overlap_TRN != "Mutant"), aes(label = vertex.names), color = "black", fontface = "bold.italic") +
+  geom_nodetext(data = subset(net, Overlap_TRN == "Mutant"), aes(label = vertex.names), color = "black", fontface = "bold.italic") + 
+  scale_linetype_manual(labels = c("Direct", "Indirect"), values = c("solid", "dashed"), drop = F) + 
+  theme_blank() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+        legend.position = "none", 
+        axis.title = element_text(color = "black", size = 16), 
+        axis.text = element_blank(), 
+        axis.ticks = element_blank(), 
+        panel.grid = element_blank()) + 
+  labs(title = "Spatial Chromatin TRN", y = "← Nucleosome \u0394 →"  , x = "← TF \u0394 →") + 
+  # coord_cartesian(clip = "off", xlim = c(mut_x - pad, mut_x + pad), ylim = c(mut_y - pad, mut_y + pad)) 
+  coord_cartesian(clip = "off")
+
+print(mech_trn)
+# ggsave(mech_trn, filename = paste0("/Users/kmoyung/Desktop/", paste(mut, collapse = "_"), "_mech.png"), dpi = 800, width = 7, height = 7)
+```
+
+## Patch expression, chromatin, and mechanistic chromatin TRN together
+
+```{r}
+patch <- orig_trn + inferred_trn + mech_trn + guide_area() + plot_layout(ncol = 2, nrow = 2, guides = "collect") + plot_annotation(tag_levels = "A") & theme(plot.tag = element_text(face = "bold"), legend.justification = "center", legend.box.just = "center")
+
+patch
+
+ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/", paste(mut, collapse = "_"), "_TRN.png"), dpi = 800, width = 9, height = 9)
+```
+## Add a few more mechanistic TRNs to the figure
+
+```{r}
+# muts <- c("CSE2", "CYC8", "GAL80", "GLN3")
+# mut <- "GLN3"
+# 
+# ## Inferred TRN ##
+# 
+# # Change format for the mutant TF
+# sub_mut.df <- subset(sig_chrom.df, Mutant %in% mut)
+# # Classify direct effects with motif + significant TF occupancy decrease
+# cutoff <- -0.5
+# sub_mut.df$DirectBinding <- ifelse(sub_mut.df$hasMotif == 1 & sub_mut.df$Subnuc_Norm <= cutoff, 1, 0)
+# chrom_mut.df <- sub_mut.df
+# chrom_mut.df$Mutant <- paste0(tolower(chrom_mut.df$Mutant), "\u0394")
+# # Check if a target is also a mutant; if so, change the formatting of the name
+# chrom_mut.df$Locus <- ifelse(chrom_mut.df$Locus %in% mutants$V1, paste0(tolower(chrom_mut.df$Locus), "\u0394"), chrom_mut.df$Locus)
+# 
+# # Label edge type depending on direct/indirect effect
+# chrom_mut.df$edgetype <- as.factor(ifelse(chrom_mut.df$DirectBinding == 1, 1, 2))
+# 
+# # Label edge color based on up/downregulation
+# chrom_mut.df$pred_txn <- as.factor(ifelse(chrom_mut.df$Predicted_Microarray > 0, "Up", "Down"))
+# chrom_mut.df$txn <- as.factor(ifelse(chrom_mut.df$Microarray_FC > 0, "Up", "Down"))
+# 
+# # Label edge color based on gain/loss of TF occupancy
+# chrom_mut.df$tfchange <- as.factor(ifelse(chrom_mut.df$TF_Change > 0, "Gain", "Loss"))
+# 
+# # Label edge color based on gain/loss of nucleosome occupancy
+# chrom_mut.df$nucchange <- as.factor(ifelse(chrom_mut.df$Nuc_Norm > 0, "Gain", "Loss"))
+# 
+# chrom_mut.df$Network <- "Chromatin"
+# 
+# # KEY: Compute x and y coordinates based on TF and Nuc score
+# tf_x <- (chrom_mut.df$Subnuc_Norm * final_fit$coefficients[2])
+# # nuc_y <- (chrom_mut.df$Nuc_Norm * fit$coefficients[3]) + 
+# #   (chrom_mut.df$Nuc_Entropy * fit$coefficients[4])
+# nuc_y <- (-1 * (chrom_mut.df$Nuc_Norm * final_fit$coefficients[3]))
+# net_coords <- cbind(tf_x, nuc_y)
+# 
+# if (length(mut) == 1) {
+#   net_coords <- rbind(c(0, 0), net_coords)
+# }
+# 
+# set.seed(999)
+# igraph_net <- graph_from_data_frame(chrom_mut.df[, c("Mutant", "Locus", "Predicted_Microarray", "DirectBinding", "edgetype", "pred_txn", "txn", "Microarray_FC", "tfchange", "nucchange")], directed = T)
+# # net <- ggnetwork(asNetwork(net), arrow.gap = 0.085, layout = net_coords)
+# net <- ggnetwork(asNetwork(igraph_net), arrow.gap = 0.105, layout = net_coords)
+# 
+# # Label nodes if they also exist in the chromatin TRN
+# net$Overlap_TRN <- ifelse(net$vertex.names %in% expr_net$vertex.names, "Overlap", "No_Overlap")
+# # Label the main node
+# net$Overlap_TRN <- ifelse(grepl("\u0394", net$vertex.names), "Mutant", net$Overlap_TRN)
+# 
+# # Compute the origin position
+# mut_x <- net$x[1]
+# mut_y <- net$y[1]
+# # pad <- 0.75 # Padding for plot area
+# pad <- 1 # Padding for plot area
+# 
+# ggplot(net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+#   # Plot guidelines 
+#   geom_hline(yintercept = mut_y, lty = 1, color = "grey75", alpha = 0.5) +
+#   geom_vline(xintercept = mut_x, lty = 1, color = "grey75", alpha = 0.5) +
+#   geom_edges(data = subset(net, pred_txn == "Up"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(10, "pt"), type = "closed"), linewidth = 1.05) +
+#   geom_edges(data = subset(net, pred_txn == "Down"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90), linewidth = 1.05) +
+#   scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96")) + 
+#   # geom_nodes(data = subset(net, Overlap_TRN == "No_Overlap"), color = "grey85", size = 16) +
+#   # geom_nodes(data = subset(net, Overlap_TRN == "No_Overlap"), color = "grey85", size = 20, alpha = 0.4) +
+#   new_scale_color() + 
+#   # geom_nodes(data = subset(net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 16) + 
+#   # geom_nodes(data = subset(net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 20, alpha = 0.4) +
+#   # geom_nodes(data = subset(net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 16) + 
+#   # geom_nodes(data = subset(net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 20, alpha = 0.4) + 
+#   geom_nodes(data = subset(net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), color = "black", size = 17) + 
+#   geom_nodes(data = subset(net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), aes(color = Overlap_TRN), size = 16) + 
+#   scale_color_manual(values = c("No_Overlap" = "grey85", "Overlap" = "#FAC898", "Mutant" = "#C3B1E1"), 
+#                      labels = c("Mutant", "No Overlap", "Overlap")) +
+#   geom_nodetext(data = subset(net, Overlap_TRN != "Mutant"), aes(label = vertex.names), color = "black", fontface = "bold.italic") +
+#   geom_nodetext(data = subset(net, Overlap_TRN == "Mutant"), aes(label = vertex.names), color = "black", fontface = "bold.italic") + 
+#   scale_linetype_manual(labels = c("Direct", "Indirect"), values = c("solid", "dashed"), drop = F) + 
+#   theme_blank() + 
+#   theme(plot.title = element_text(hjust = 0.5), 
+#         legend.position = "none", 
+#         axis.title = element_text(color = "black", size = 16), 
+#         axis.text = element_blank(), 
+#         axis.ticks = element_blank(), 
+#         panel.grid = element_blank()) + 
+#   labs(title = "Spatial Chromatin TRN", y = "← Nucleosome \u0394 →"  , x = "← TF \u0394 →") + 
+#   # coord_cartesian(clip = "off", xlim = c(mut_x - pad, mut_x + pad), ylim = c(mut_y - pad, mut_y + pad)) 
+#   coord_cartesian(clip = "off")
+```
+
+
+## Tally overlap of targets between chromatin and expression
+
+```{r}
+e <- 0.85
+sig_expr.df <- subset(master.df, abs(Microarray_FC) > e) 
+
+# Tally overlap per mutant
+overlap_counts <- sig_expr.df %>%
+  inner_join(sig_chrom.df, by = c("Mutant", "Locus")) %>%
+  distinct(Mutant, Locus, .keep_all = T) %>%
+  group_by(Mutant) %>%
+  summarize(overlap_count = n())
+
+# Calculate percentage
+total_pairs <- sig_expr.df %>%
+  distinct(Mutant, Locus) %>%
+  group_by(Mutant) %>%
+  summarise(total_pairs = n())
+
+overlap_counts <- overlap_counts %>%
+  inner_join(total_pairs, by = "Mutant") %>%
+  mutate(overlap_percentage = (overlap_count / total_pairs) * 100)
+
+# Change format of mutant labels
+overlap_counts$Mutant <- paste0(tolower(overlap_counts$Mutant), "∆")
+
+overlap_bar <- ggplot(overlap_counts, aes(y = reorder(Mutant, overlap_count), x = overlap_count)) + 
+  geom_bar(stat = "identity", color = "black", fill = "#FAC898") + 
+  theme_classic() + 
+  coord_cartesian(expand = c(0,0)) +
+  theme(axis.title.y = element_blank(), 
+        axis.text.y = element_text(face = "italic", color = "black", size = 14), 
+        axis.text.x = element_text(color = "black", size = 14), 
+        axis.title.x = element_text(size = 14)) + 
+  labs(x = "# of Overlapping Targets")
+overlap_bar
+
+overlap_pct <- ggplot(overlap_counts, aes(y = reorder(Mutant, overlap_percentage), x = overlap_percentage)) + 
+  geom_bar(stat = "identity", color = "black", fill = "#FAC898") + 
+  theme_classic() + 
+  coord_cartesian(expand = c(0,0), clip = "off") +
+  theme(axis.title.y = element_blank(), 
+        axis.text.y = element_text(face = "italic", color = "black", size = 14), 
+        axis.text.x = element_text(color = "black", size = 14), 
+        axis.title.x = element_text(size = 14), 
+        plot.margin = margin(, 1, , , "cm")) + 
+  labs(x = "% of Overlapping Targets")
+overlap_pct
+
+overlap_supp <- overlap_bar + overlap_pct + plot_layout(widths = c(1, 1.5)) + plot_annotation(tag_levels = "A") & 
+  theme(plot.tag = element_text(face = "bold"))
+overlap_supp
+
+ggsave(overlap_supp, filename = "/Users/kmoyung/supp_figures/trn_overlap.png", dpi = 800, width = 10, height = 10)
+```
+
+## Predict TRN for each mutant
+
+```{r}
+for (mut in unique(sig_chrom.df$Mutant)) {
+  tryCatch({
+    sub_mut.df <- subset(sig_chrom.df, Mutant %in% mut)
+
+    # Classify direct effects with motif + significant TF occupancy decrease
+    cutoff <- -0.5
+    sub_mut.df$DirectBinding <- ifelse(sub_mut.df$hasMotif == 1 & sub_mut.df$Subnuc_Norm <= cutoff, 1, 0)
+    # sub_mut.df$DirectBinding <- ifelse(sub_mut.df$hasMotif == 1 & sub_mut.df$TF_Change <= cutoff, 1, 0)
+    
+    # Build network
+    
+    ## Inferred TRN ##
+  
+    # Change format for the mutant TF
+    chrom_mut.df <- sub_mut.df
+    chrom_mut.df$Mutant <- paste0(tolower(chrom_mut.df$Mutant), "\u0394")
+    # Check if a target is also a mutant; if so, change the formatting of the name
+    chrom_mut.df$Locus <- ifelse(chrom_mut.df$Locus %in% mutants$V1, paste0(tolower(chrom_mut.df$Locus), "\u0394"), chrom_mut.df$Locus)
+    
+    # Label edge type depending on direct/indirect effect
+    chrom_mut.df$edgetype <- as.factor(ifelse(chrom_mut.df$DirectBinding == 1, 1, 2))
+    
+    # Label edge color based on up/downregulation
+    chrom_mut.df$pred_txn <- as.factor(ifelse(chrom_mut.df$Predicted_Microarray > 0, "Up", "Down"))
+    chrom_mut.df$txn <- as.factor(ifelse(chrom_mut.df$Microarray_FC > 0, "Up", "Down"))
+    
+    # Label edge color based on gain/loss of TF occupancy
+    chrom_mut.df$tfchange <- as.factor(ifelse(chrom_mut.df$TF_Change > 0, "Gain", "Loss"))
+    
+    # Label edge color based on gain/loss of nucleosome occupancy
+    chrom_mut.df$nucchange <- as.factor(ifelse(chrom_mut.df$Nuc_Norm > 0, "Gain", "Loss"))
+    
+    chrom_mut.df$Network <- "Chromatin"
+    
+    set.seed(999)
+    net <- graph_from_data_frame(chrom_mut.df[, c("Mutant", "Locus", "Predicted_Microarray", "DirectBinding", "edgetype", "pred_txn", "txn", "Microarray_FC", "tfchange", "nucchange")], directed = T)
+    # net <- ggnetwork(asNetwork(net), arrow.gap = 0.085)
+    net <- ggnetwork(asNetwork(net), arrow.gap = 0.105)
+    
+    ## Expression-based TRN ##
+    # Try various cutoffs
+    e <- 0.85
+    expr_mut.df <- subset(master.df, Mutant %in% mut & (Microarray_FC > e | Microarray_FC < -e))
+    
+    # Change format for the mutant TF
+    expr_mut.df$Mutant <- paste0(tolower(expr_mut.df$Mutant), "\u0394")
+    # Check if a target is also a mutant; if so, change the formatting of the name
+    expr_mut.df$Locus <- ifelse(expr_mut.df$Locus %in% mutants$V1, paste0(tolower(expr_mut.df$Locus), "\u0394"), expr_mut.df$Locus)
+    expr_mut.df$txn <- as.factor(ifelse(expr_mut.df$Microarray_FC > 0, "Up", "Down"))
+    
+    expr_mut.df$Network <- "Expression"
+    
+    set.seed(999)
+    expr_net <- graph_from_data_frame(expr_mut.df[, c("Mutant", "Locus", "Microarray_FC", "txn")], directed = T)
+    # expr_net <- ggnetwork(asNetwork(expr_net), arrow.gap = 0.085)
+    expr_net <- ggnetwork(asNetwork(expr_net), arrow.gap = 0.105)
+    
+    # Label nodes if they also exist in the chromatin TRN
+    expr_net$Overlap_TRN <- ifelse(expr_net$vertex.names %in% net$vertex.names, "Overlap", "No_Overlap")
+    # Label the main node
+    expr_net$Overlap_TRN <- ifelse(grepl("\u0394", expr_net$vertex.names), "Mutant", expr_net$Overlap_TRN)
+    
+    orig_trn <- ggplot(expr_net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+      geom_edges(data = subset(expr_net, txn == "Up"), aes(color = txn), arrow = arrow(length = unit(10, "pt"), type = "closed"), linetype = "dashed", linewidth = 1.05) +
+      geom_edges(data = subset(expr_net, txn == "Down"), aes(color = txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90), linetype = "dashed", linewidth = 1.05) +
+      scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96")) + 
+      # geom_nodes(data = subset(expr_net, Overlap_TRN == "No_Overlap"), color = "grey85", size = 16) +
+      # geom_nodes(data = subset(expr_net, Overlap_TRN == "No_Overlap"), color = "grey85", size = 20, alpha = 0.4) +
+      new_scale_color() + 
+      # geom_nodes(data = subset(expr_net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 16) + 
+      # geom_nodes(data = subset(expr_net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 20, alpha = 0.4) + 
+      # geom_nodes(data = subset(expr_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 16) + 
+      # geom_nodes(data = subset(expr_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 20, alpha = 0.4) + 
+      geom_nodes(data = subset(expr_net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), color = "black", size = 17) + 
+      geom_nodes(data = subset(expr_net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), aes(color = Overlap_TRN), size = 16) +
+      scale_color_manual(values = c("No_Overlap" = "grey85", "Overlap" = "#FAC898", "Mutant" = "#C3B1E1"), 
+                         labels = c("Mutant", "No Overlap", "Overlap")) + 
+      geom_nodetext(aes(label = vertex.names), color = "black", fontface = "bold.italic") + 
+      theme_blank() + 
+      theme(plot.title = element_text(hjust = 0.5), 
+            legend.position = "none") + 
+      labs(title = "Expression TRN") + 
+      coord_cartesian(clip = "off")
+    
+    # Label nodes if they also exist in the chromatin TRN
+    net$Overlap_TRN <- ifelse(net$vertex.names %in% expr_net$vertex.names, "Overlap", "No_Overlap")
+    # Label the main node
+    net$Overlap_TRN <- ifelse(grepl("\u0394", net$vertex.names), "Mutant", net$Overlap_TRN)
+    
+    # Plot a TRN with just overlapping nodes between expression and chromatin first
+    set.seed(999)
+    overlap_chrom_mut.df <- subset(chrom_mut.df, Locus %in% subset(net, Overlap_TRN == "Overlap")$vertex.names)
+    overlap_net <- graph_from_data_frame(overlap_chrom_mut.df[, c("Mutant", "Locus", "Predicted_Microarray", "DirectBinding", "edgetype", "pred_txn", "txn", "Microarray_FC", "tfchange", "nucchange")], directed = T)
+    # overlap_net <- ggnetwork(asNetwork(overlap_net), arrow.gap = 0.085)
+    overlap_net <- ggnetwork(asNetwork(overlap_net), arrow.gap = 0.105)
+    
+    overlap_net$Overlap_TRN <- ifelse(overlap_net$vertex.names %in% expr_net$vertex.names, "Overlap", "No_Overlap")
+    # Label the main node
+    overlap_net$Overlap_TRN <- ifelse(grepl("\u0394", overlap_net$vertex.names), "Mutant", overlap_net$Overlap_TRN)
+  
+    inferred_trn <- ggplot(net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+      geom_edges(data = subset(net, pred_txn == "Up"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(10, "pt"), type = "closed"), linewidth = 1.05, show.legend = F) +
+      geom_edges(data = subset(net, pred_txn == "Down"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90), linewidth = 1.05, show.legend = F) +
+      geom_line(data = net, aes(linetype = edgetype, color = pred_txn), linewidth = 1.05) +
+      scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96"), drop = F) + 
+      guides(color = guide_legend(title = "", drop = F)) + 
+      new_scale_color() + 
+      geom_nodes(data = subset(net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), color = "black", size = 17) + 
+      geom_nodes(data = subset(net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), aes(color = Overlap_TRN), size = 16) + 
+      scale_color_manual(values = c("No_Overlap" = "grey85", "Overlap" = "#FAC898", "Mutant" = "#C3B1E1"), 
+                     labels = c("Mutant", "Chromatin\nOR\nExpression", "Chromatin\nAND\nExpression")) + 
+  guides(color = guide_legend(override.aes = list(size = 10))) + 
+  geom_nodetext(aes(label = vertex.names), color = "black", fontface = "bold.italic") + 
+  theme_blank() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+        legend.position = "bottom", 
+        legend.text = element_text(size = 12), 
+        legend.key.width = unit(2.5, "line")) + 
+  scale_linetype_manual(labels = c("Direct w/\nChromatin Evidence", "Unknown\nDirect/Indirect"), values = c("solid", "dashed"), drop = F) + 
+      labs(title = "Chromatin TRN", color = "", linetype = "") + 
+      coord_cartesian(clip = "off")
+  
+    ## Plot mechanistic layout
+    ## Inferred TRN ##
+  
+    # Change format for the mutant TF
+    chrom_mut.df <- sub_mut.df
+    chrom_mut.df$Mutant <- paste0(tolower(chrom_mut.df$Mutant), "\u0394")
+    # Check if a target is also a mutant; if so, change the formatting of the name
+    chrom_mut.df$Locus <- ifelse(chrom_mut.df$Locus %in% mutants$V1, paste0(tolower(chrom_mut.df$Locus), "\u0394"), chrom_mut.df$Locus)
+    
+    # Label edge type depending on direct/indirect effect
+    chrom_mut.df$edgetype <- as.factor(ifelse(chrom_mut.df$DirectBinding == 1, 1, 2))
+    
+    # Label edge color based on up/downregulation
+    chrom_mut.df$pred_txn <- as.factor(ifelse(chrom_mut.df$Predicted_Microarray > 0, "Up", "Down"))
+    chrom_mut.df$txn <- as.factor(ifelse(chrom_mut.df$Microarray_FC > 0, "Up", "Down"))
+    
+    # Label edge color based on gain/loss of TF occupancy
+    chrom_mut.df$tfchange <- as.factor(ifelse(chrom_mut.df$TF_Change > 0, "Gain", "Loss"))
+    
+    # Label edge color based on gain/loss of nucleosome occupancy
+    chrom_mut.df$nucchange <- as.factor(ifelse(chrom_mut.df$Nuc_Norm > 0, "Gain", "Loss"))
+    
+    chrom_mut.df$Network <- "Chromatin"
+    
+    # KEY: Compute x and y coordinates based on TF and Nuc score
+    tf_x <- (chrom_mut.df$Subnuc_Norm * final_fit$coefficients[2])
+    # nuc_y <- (chrom_mut.df$Nuc_Norm * fit$coefficients[3]) + 
+    #   (chrom_mut.df$Nuc_Entropy * fit$coefficients[4])
+    nuc_y <- (-1 * (chrom_mut.df$Nuc_Norm * final_fit$coefficients[3]))
+    net_coords <- cbind(tf_x, nuc_y)
+    
+    if (length(mut) == 1) {
+      net_coords <- rbind(c(0, 0), net_coords)
+    }
+    
+    set.seed(999)
+    igraph_net <- graph_from_data_frame(chrom_mut.df[, c("Mutant", "Locus", "Predicted_Microarray", "DirectBinding", "edgetype", "pred_txn", "txn", "Microarray_FC", "tfchange", "nucchange")], directed = T)
+    # net <- ggnetwork(asNetwork(net), arrow.gap = 0.085, layout = net_coords)
+    net <- ggnetwork(asNetwork(igraph_net), arrow.gap = 0.105, layout = net_coords)
+    
+    # Label nodes if they also exist in the chromatin TRN
+    net$Overlap_TRN <- ifelse(net$vertex.names %in% expr_net$vertex.names, "Overlap", "No_Overlap")
+    # Label the main node
+    net$Overlap_TRN <- ifelse(grepl("\u0394", net$vertex.names), "Mutant", net$Overlap_TRN)
+    
+    # Compute the origin position
+    mut_x <- net$x[1]
+    mut_y <- net$y[1]
+    # pad <- 0.75 # Padding for plot area
+    pad <- 1 # Padding for plot area
+    
+    mech_trn <- ggplot(net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+      # Plot guidelines 
+      geom_hline(yintercept = mut_y, lty = 1, color = "grey75", alpha = 1) +
+      geom_vline(xintercept = mut_x, lty = 1, color = "grey75", alpha = 1) +
+      geom_edges(data = subset(net, pred_txn == "Up"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(10, "pt"), type = "closed"), linewidth = 1.05) +
+      geom_edges(data = subset(net, pred_txn == "Down"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90), linewidth = 1.05) +
+      scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96")) + 
+      # geom_nodes(data = subset(net, Overlap_TRN == "No_Overlap"), color = "grey85", size = 16) +
+      # geom_nodes(data = subset(net, Overlap_TRN == "No_Overlap"), color = "grey85", size = 20, alpha = 0.4) +
+      new_scale_color() + 
+      # geom_nodes(data = subset(net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 16) + 
+      # geom_nodes(data = subset(net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 20, alpha = 0.4) +
+      # geom_nodes(data = subset(net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 16) + 
+      # geom_nodes(data = subset(net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 20, alpha = 0.4) + 
+      geom_nodes(data = subset(net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), color = "black", size = 17) + 
+      geom_nodes(data = subset(net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), aes(color = Overlap_TRN), size = 16) + 
+      scale_color_manual(values = c("No_Overlap" = "grey85", "Overlap" = "#FAC898", "Mutant" = "#C3B1E1"), 
+                         labels = c("Mutant", "No Overlap", "Overlap")) +
+      geom_nodetext(data = subset(net, Overlap_TRN != "Mutant"), aes(label = vertex.names), color = "black", fontface = "bold.italic") +
+      geom_nodetext(data = subset(net, Overlap_TRN == "Mutant"), aes(label = vertex.names), color = "black", fontface = "bold.italic") + 
+      scale_linetype_manual(labels = c("Direct", "Indirect"), values = c("solid", "dashed"), drop = F) + 
+      theme_blank() + 
+      theme(plot.title = element_text(hjust = 0.5), 
+            legend.position = "none", 
+            axis.title = element_text(color = "black", size = 16), 
+            axis.text = element_blank(), 
+            axis.ticks = element_blank(), 
+            panel.grid = element_blank()) + 
+      labs(title = "Spatial Chromatin TRN", y = "← Nucleosome \u0394 →"  , x = "← TF \u0394 →") + 
+      # coord_cartesian(clip = "off", xlim = c(mut_x - pad, mut_x + pad), ylim = c(mut_y - pad, mut_y + pad)) 
+      coord_cartesian(clip = "off")
+    
+    ## Patch expression, chromatin, and mechanistic chromatin TRN together
+    patch <- orig_trn + inferred_trn + mech_trn + guide_area() + plot_layout(ncol = 2, nrow = 2, guides = "collect") + plot_annotation(tag_levels = "A") & theme(plot.tag = element_text(face = "bold"), legend.justification = "center", legend.box.just = "center")
+    
+    ggsave(patch, filename = paste0("/Users/kmoyung/trn_figures/", paste(mut, collapse = "_"), "_TRN.png"), dpi = 800, width = 9, height = 9)
+  }, error = function(e){})
+  
+}
+```
+
+## Plot expression network of all mutants together
+
+```{r}
+## Expression-based TRN ##
+# Try various cutoffs
+e <- 1.2
+expr_mut.df <- subset(sub_master.df, (Microarray_FC > e | Microarray_FC < -e))
+
+# Remove potential duplicate edges
+expr_mut.df <- expr_mut.df %>%
+  dplyr::distinct(Mutant, Locus, .keep_all = T)
+
+# Change format for the mutant TF
+expr_mut.df$Mutant <- paste0(tolower(expr_mut.df$Mutant), "\u0394")
+# Check if a target is also a mutant; if so, change the formatting of the name
+expr_mut.df$Locus <- ifelse(expr_mut.df$Locus %in% mutants$V1, paste0(tolower(expr_mut.df$Locus), "\u0394"), expr_mut.df$Locus)
+expr_mut.df$txn <- as.factor(ifelse(expr_mut.df$Microarray_FC > 0, "Up", "Down"))
+
+expr_mut.df$Network <- "Expression"
+
+set.seed(999)
+expr_net <- graph_from_data_frame(expr_mut.df[, c("Mutant", "Locus", "Microarray_FC", "txn")], directed = T)
+# expr_net <- ggnetwork(asNetwork(expr_net), arrow.gap = 0.085)
+expr_net <- ggnetwork(asNetwork(expr_net), arrow.gap = 0.025)
+
+# Label the mutant nodes
+expr_net$Overlap_TRN <- ifelse(grepl("\u0394", expr_net$vertex.names), "Mutant", "Non-Mutant")
+
+orig_trn <- ggplot(expr_net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+  geom_edges(data = subset(expr_net, txn == "Up"), aes(color = txn), arrow = arrow(length = unit(10, "pt"), type = "closed"), linetype = "dashed", alpha = 0.3) +
+  geom_edges(data = subset(expr_net, txn == "Down"), aes(color = txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90), linetype = "dashed", alpha = 0.3) +
+  scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96")) + 
+  geom_nodes(data = subset(expr_net, Overlap_TRN != "Mutant"), color = "black", size = 5) + 
+  geom_nodes(data = subset(expr_net, Overlap_TRN != "Mutant"), color = "grey85", size = 4) +
+  # geom_nodes(data = subset(expr_net, Overlap_TRN != "Mutant"), color = "grey85", size = 12, alpha = 0.4) +
+  new_scale_color() + 
+  geom_nodes(data = subset(expr_net, Overlap_TRN == "Mutant"), color = "black", size = 17) + 
+  geom_nodes(data = subset(expr_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 16) + 
+  # geom_nodes(data = subset(expr_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 20, alpha = 0.4) + 
+  geom_nodetext(data = subset(expr_net, Overlap_TRN == "Mutant"), aes(label = vertex.names), color = "black") +
+  theme_blank() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+        legend.position = "none") + 
+  labs(title = "Expression-based TRN") + 
+  coord_cartesian(clip = "off")
+print(orig_trn)
+ggsave(orig_trn, filename = "/Users/kmoyung/Desktop/original_expression_TRN.png", dpi = 800, width = 16, height = 16)
+```
+
+## Plot chromatin network of all mutants
+
+```{r}
+## Chromatin-based TRN ##
+chrom_mut.df <- sig_chrom.df
+
+# Change format for the mutant TF
+chrom_mut.df$Mutant <- paste0(tolower(chrom_mut.df$Mutant), "\u0394")
+# Check if a target is also a mutant; if so, change the formatting of the name
+chrom_mut.df$Locus <- ifelse(chrom_mut.df$Locus %in% mutants$V1, paste0(tolower(chrom_mut.df$Locus), "\u0394"), chrom_mut.df$Locus)
+chrom_mut.df$txn <- as.factor(ifelse(chrom_mut.df$Microarray_FC > 0, "Up", "Down"))
+
+chrom_mut.df$Network <- "Chromatin"
+
+set.seed(999)
+chrom_net <- graph_from_data_frame(chrom_mut.df[, c("Mutant", "Locus", "Microarray_FC", "txn")], directed = T)
+chrom_net <- ggnetwork(asNetwork(chrom_net), arrow.gap = 0.025)
+
+# Label the mutant nodes
+chrom_net$Overlap_TRN <- ifelse(grepl("\u0394", chrom_net$vertex.names), "Mutant", "Non-Mutant")
+
+chrom_trn <- ggplot(chrom_net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+  geom_edges(data = subset(chrom_net, txn == "Up"), aes(color = txn), arrow = arrow(length = unit(10, "pt"), type = "closed"), linetype = "dashed", alpha = 0.3) +
+  geom_edges(data = subset(chrom_net, txn == "Down"), aes(color = txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90), linetype = "dashed", alpha = 0.3) +
+  scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96")) + 
+  geom_nodes(data = subset(chrom_net, Overlap_TRN != "Mutant"), color = "black", size = 5) + 
+  geom_nodes(data = subset(chrom_net, Overlap_TRN != "Mutant"), color = "grey85", size = 4) +
+  new_scale_color() + 
+  geom_nodes(data = subset(chrom_net, Overlap_TRN == "Mutant"), color = "black", size = 17) + 
+  geom_nodes(data = subset(chrom_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 16) + 
+  geom_nodetext(data = subset(chrom_net, Overlap_TRN == "Mutant"), aes(label = vertex.names), color = "black") +
+  theme_blank() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+        legend.position = "none") + 
+  labs(title = "Chromatin TRN") + 
+  coord_cartesian(clip = "off")
+print(chrom_trn)
+ggsave(chrom_trn, filename = "/Users/kmoyung/Desktop/original_chromatin_TRN.png", dpi = 800, width = 10, height = 10)
+```
+## Plot more examples of chromatin TRNs with specific mutants
+
+```{r}
+mut <- c("ARG80", "ARG81", "SWI4", "SWI6")
+sub_mut.df <- subset(sig_chrom.df, Mutant %in% mut)
+
+# Classify direct effects with motif + significant TF occupancy decrease
+cutoff <- -0.5
+sub_mut.df$DirectBinding <- ifelse(sub_mut.df$hasMotif == 1 & sub_mut.df$Subnuc_Norm <= cutoff, 1, 0)
+# sub_mut.df$DirectBinding <- ifelse(sub_mut.df$hasMotif == 1 & sub_mut.df$TF_Change <= cutoff, 1, 0)
+
+sub_mut.df[, c("Mutant", "Locus", "Microarray_FC", "Predicted_Microarray", "hasMotif", "DirectBinding", "True_Direct_Interaction", "Subnuc_Norm", "TF_Change")] 
+```
+
+Build network
+
+```{r}
+## Inferred TRN ##
+
+# Change format for the mutant TF
+chrom_mut.df <- sub_mut.df
+chrom_mut.df$Mutant <- paste0(tolower(chrom_mut.df$Mutant), "\u0394")
+# Check if a target is also a mutant; if so, change the formatting of the name
+chrom_mut.df$Locus <- ifelse(chrom_mut.df$Locus %in% mutants$V1, paste0(tolower(chrom_mut.df$Locus), "\u0394"), chrom_mut.df$Locus)
+
+# Label edge type depending on direct/indirect effect
+chrom_mut.df$edgetype <- as.factor(ifelse(chrom_mut.df$DirectBinding == 1, 1, 2))
+
+# Label edge color based on up/downregulation
+chrom_mut.df$pred_txn <- as.factor(ifelse(chrom_mut.df$Predicted_Microarray > 0, "Up", "Down"))
+chrom_mut.df$txn <- as.factor(ifelse(chrom_mut.df$Microarray_FC > 0, "Up", "Down"))
+
+# Label edge color based on gain/loss of TF occupancy
+chrom_mut.df$tfchange <- as.factor(ifelse(chrom_mut.df$TF_Change > 0, "Gain", "Loss"))
+
+# Label edge color based on gain/loss of nucleosome occupancy
+chrom_mut.df$nucchange <- as.factor(ifelse(chrom_mut.df$Nuc_Norm > 0, "Gain", "Loss"))
+
+chrom_mut.df$Network <- "Chromatin"
+
+set.seed(999)
+net <- graph_from_data_frame(chrom_mut.df[, c("Mutant", "Locus", "Predicted_Microarray", "DirectBinding", "edgetype", "pred_txn", "txn", "Microarray_FC", "tfchange", "nucchange")], directed = T)
+net <- ggnetwork(asNetwork(net), arrow.gap = 0.05)
+# net <- ggnetwork(asNetwork(net), arrow.gap = 0.105)
+
+## Expression-based TRN ##
+# Try various cutoffs
+e <- 0.85
+expr_mut.df <- subset(master.df, Mutant %in% mut & (Microarray_FC > e | Microarray_FC < -e))
+
+# Change format for the mutant TF
+expr_mut.df$Mutant <- paste0(tolower(expr_mut.df$Mutant), "\u0394")
+# Check if a target is also a mutant; if so, change the formatting of the name
+expr_mut.df$Locus <- ifelse(expr_mut.df$Locus %in% mutants$V1, paste0(tolower(expr_mut.df$Locus), "\u0394"), expr_mut.df$Locus)
+expr_mut.df$txn <- as.factor(ifelse(expr_mut.df$Microarray_FC > 0, "Up", "Down"))
+
+expr_mut.df$Network <- "Expression"
+
+set.seed(999)
+expr_net <- graph_from_data_frame(expr_mut.df[, c("Mutant", "Locus", "Microarray_FC", "txn")], directed = T)
+# expr_net <- ggnetwork(asNetwork(expr_net), arrow.gap = 0.085)
+expr_net <- ggnetwork(asNetwork(expr_net), arrow.gap = 0.105)
+
+# Label nodes if they also exist in the chromatin TRN
+expr_net$Overlap_TRN <- ifelse(expr_net$vertex.names %in% net$vertex.names, "Overlap", "No_Overlap")
+# Label the main node
+expr_net$Overlap_TRN <- ifelse(grepl("\u0394", expr_net$vertex.names), "Mutant", expr_net$Overlap_TRN)
+
+orig_trn <- ggplot(expr_net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+  geom_edges(data = subset(expr_net, txn == "Up"), aes(color = txn), arrow = arrow(length = unit(10, "pt"), type = "closed"), linetype = "dashed", linewidth = 1.05) +
+  geom_edges(data = subset(expr_net, txn == "Down"), aes(color = txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90), linetype = "dashed", linewidth = 1.05) +
+  scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96")) + 
+  # geom_nodes(data = subset(expr_net, Overlap_TRN == "No_Overlap"), color = "grey85", size = 16) +
+  # geom_nodes(data = subset(expr_net, Overlap_TRN == "No_Overlap"), color = "grey85", size = 20, alpha = 0.4) +
+  new_scale_color() + 
+  # geom_nodes(data = subset(expr_net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 16) + 
+  # geom_nodes(data = subset(expr_net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 20, alpha = 0.4) + 
+  # geom_nodes(data = subset(expr_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 16) + 
+  # geom_nodes(data = subset(expr_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 20, alpha = 0.4) + 
+  geom_nodes(data = subset(expr_net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), color = "black", size = 17) + 
+  geom_nodes(data = subset(expr_net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), aes(color = Overlap_TRN), size = 16) +
+  scale_color_manual(values = c("No_Overlap" = "grey85", "Overlap" = "#FAC898", "Mutant" = "#C3B1E1"), 
+                     labels = c("Mutant", "No Overlap", "Overlap")) + 
+  geom_nodetext(aes(label = vertex.names), color = "black", fontface = "bold.italic") + 
+  theme_blank() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+        legend.position = "none") + 
+  labs(title = "Expression TRN") + 
+  coord_cartesian(clip = "off")
+# print(orig_trn)
+
+# Label nodes if they also exist in the chromatin TRN
+net$Overlap_TRN <- ifelse(net$vertex.names %in% expr_net$vertex.names, "Overlap", "No_Overlap")
+# Label the main node
+net$Overlap_TRN <- ifelse(grepl("\u0394", net$vertex.names), "Mutant", net$Overlap_TRN)
+
+# Plot a TRN with just overlapping nodes between expression and chromatin first
+set.seed(999)
+overlap_chrom_mut.df <- subset(chrom_mut.df, Locus %in% subset(net, Overlap_TRN == "Overlap")$vertex.names)
+overlap_net <- graph_from_data_frame(overlap_chrom_mut.df[, c("Mutant", "Locus", "Predicted_Microarray", "DirectBinding", "edgetype", "pred_txn", "txn", "Microarray_FC", "tfchange", "nucchange")], directed = T)
+# overlap_net <- ggnetwork(asNetwork(overlap_net), arrow.gap = 0.085)
+overlap_net <- ggnetwork(asNetwork(overlap_net), arrow.gap = 0.105)
+
+overlap_net$Overlap_TRN <- ifelse(overlap_net$vertex.names %in% expr_net$vertex.names, "Overlap", "No_Overlap")
+# Label the main node
+overlap_net$Overlap_TRN <- ifelse(grepl("\u0394", overlap_net$vertex.names), "Mutant", overlap_net$Overlap_TRN)
+
+# overlap_inferred_trn <- ggplot(overlap_net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+#   geom_edges(data = subset(overlap_net, pred_txn == "Up"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(10, "pt"), type = "closed"), linewidth = 1.05) +
+#   geom_edges(data = subset(overlap_net, pred_txn == "Down"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90), linewidth = 1.05) +
+#   scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96")) + 
+#   # geom_nodes(data = subset(net, Overlap_TRN == "No_Overlap"), color = "#77dd77", size = 16) +
+#   # geom_nodes(data = subset(net, Overlap_TRN == "No_Overlap"), color = "#77dd77", size = 20, alpha = 0.4) +
+#   new_scale_color() + 
+#   geom_nodes(data = subset(overlap_net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 16) + 
+#   geom_nodes(data = subset(overlap_net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 20, alpha = 0.4) +
+#   geom_nodes(data = subset(overlap_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 16) + 
+#   geom_nodes(data = subset(overlap_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 20, alpha = 0.4) + 
+#   geom_nodetext(aes(label = vertex.names), color = "black", fontface = "bold.italic") + 
+#   theme_blank() + 
+#   theme(plot.title = element_text(hjust = 0.5), 
+#         legend.position = "none") + 
+#   labs(title = "Chromatin TRN") + 
+#   coord_cartesian(clip = "off")
+# print(overlap_inferred_trn)
+
+inferred_trn <- ggplot(net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+  geom_edges(data = subset(net, pred_txn == "Up"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(10, "pt"), type = "closed"), linewidth = 1.05, show.legend = F) +
+  geom_edges(data = subset(net, pred_txn == "Down"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90), linewidth = 1.05, show.legend = F) +
+  geom_line(data = net, aes(linetype = edgetype, color = pred_txn), linewidth = 1.05) +
+  scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96"), drop = F) + 
+  guides(color = guide_legend(title = "", drop = F)) + 
+  new_scale_color() + 
+  geom_nodes(data = subset(net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), color = "black", size = 17) + 
+  geom_nodes(data = subset(net, Overlap_TRN %in% c("No_Overlap", "Overlap", "Mutant")), aes(color = Overlap_TRN), size = 16) + 
+  scale_color_manual(values = c("No_Overlap" = "grey85", "Overlap" = "#FAC898", "Mutant" = "#C3B1E1"), 
+                     labels = c("Mutant", "No Overlap", "Overlap")) + 
+  guides(color = guide_legend(override.aes = list(size = 10))) + 
+  geom_nodetext(aes(label = vertex.names), color = "black", fontface = "bold.italic") + 
+  theme_blank() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+        legend.position = "bottom", 
+        legend.text = element_text(size = 12), 
+        legend.key.width = unit(2.5, "line")) + 
+  scale_linetype_manual(labels = c("Direct", "Indirect"), values = c("solid", "dashed"), drop = F) + 
+  labs(title = "Chromatin TRN", color = "", linetype = "") + 
+  coord_cartesian(clip = "off")
+print(inferred_trn)
+
+ggsave(inferred_trn, filename = paste0("/Users/kmoyung/supp_figures/", paste(mut, collapse = "_"), "_TRN.png"), dpi = 800, width = 10, height = 10)
+```
+
+######
+
+## Calculate correlation between microarray txn vs. predicted txn
+
+```{r}
+cor.df <- sig_chrom.df %>%
+  group_by(Mutant) %>%
+  summarize(pearson = cor(Microarray_FC, Predicted_Microarray))
+
+trn_correlation <- ggplot(subset(cor.df, pearson > 0), aes(x = reorder(paste0(tolower(Mutant), "\u0394"), -pearson), y = pearson)) +
+  geom_point(color = "black", size = 2) + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 70, hjust = 1), 
+        plot.title = element_text(size = 12, face = "bold")) + 
+  geom_hline(yintercept = 0.5, lty = 2, lwd = 0.2) + 
+  labs(x = "Mutant", y = "Pearson's R", title = "Predicted vs. observed expression in TRNs")
+
+trn_correlation
+ggsave(trn_correlation, filename = "/Users/kmoyung/Desktop/trn_correlation.png", dpi = 800, width = 4, height = 4)
+```
+
+# Calculate the % of correctly predicted edges among overlapping interactions
+
+```{r}
+all_overlaps.df <- data.frame(Mutant = "", count = 0, pct_overlap = 0)
+for (mut in unique(sig_chrom.df$Mutant)) {
+  sub_mut.df <- subset(sig_chrom.df, Mutant %in% mut)
+  expr_mut.df <- subset(sub_master.df, Mutant %in% mut & (Microarray_FC > e | Microarray_FC < -e))
+  overlap.df <- sub_mut.df %>%
+    inner_join(expr_mut.df, by = "Locus") %>%
+    mutate(pred_txn = case_when(Predicted_Microarray > 0 ~ "Up", 
+                                Predicted_Microarray < 0 ~ "Down"), 
+           txn = case_when(Microarray_FC.x > 0 ~ "Up", 
+                          Microarray_FC.x < 0 ~ "Down")) %>%
+    summarize(Mutant = mut, 
+              count = count(pred_txn == txn)) %>%
+    mutate(pct_overlap = count / nrow(sub_mut.df) * 100)
+  all_overlaps.df <- rbind(all_overlaps.df, overlap.df)
+}
+all_overlaps.df <- all_overlaps.df[-1, ]
+```
+
+Plot
+
+```{r}
+pct_plot <- ggplot(subset(all_overlaps.df, pct_overlap > 0), aes(x = reorder(paste0(tolower(Mutant), "\u0394"), pct_overlap), y = pct_overlap)) + 
+  geom_bar(stat = "identity", color = "black", fill = "grey70", width = 0.6) + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 70, hjust = 1, color = "black"),
+        axis.text.y = element_text(face = "italic", color = "black"),
+        plot.title = element_blank()) + 
+  labs(x = "Mutant", title = "% of TRN Targets Overlapping with Expression TRN", y = "Percent (%)") + 
+  coord_flip()
+count_plot <- ggplot(subset(all_overlaps.df, count > 0), aes(x = paste0(tolower(Mutant), "\u0394"), y = count)) + 
+  geom_bar(stat = "identity", color = "black", fill = "grey70", width = 0.6) + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 70, hjust = 1), 
+        plot.title = element_text(face = "bold")) + 
+  labs(x = "Mutant", title = "# of TRN Targets Overlapping with Expression TRN", y = "Count")
+patch <- pct_plot 
+print(patch)
+ggsave(patch, filename = "/Users/kmoyung/Desktop/overlap_TRN_barplot.png", dpi = 800, width = 2, height = 3)
+```
+
+## Compare TRNs for every mutant
+
+```{r}
+compare_trn.df <- data.frame(Mutant = "", Group = "", Count = 0)
+e <- 1.5
+for (mut in unique(sig_chrom.df$Mutant)) {
+  sub_mut.df <- subset(sig_chrom.df, Mutant %in% mut)
+  expr_mut.df <- subset(sub_master.df, Mutant %in% mut & (Microarray_FC > e | Microarray_FC < -e))
+  
+  compare_trn.df <- rbind(compare_trn.df, c(mut, "Overlap", length(intersect(sub_mut.df$Locus, expr_mut.df$Locus))))
+  compare_trn.df <- rbind(compare_trn.df, c(mut, "Chrom", length(setdiff(sub_mut.df$Locus, expr_mut.df$Locus))))
+  compare_trn.df <- rbind(compare_trn.df, c(mut, "Expr", length(setdiff(expr_mut.df$Locus, sub_mut.df$Locus))))
+}
+compare_trn.df <- compare_trn.df[-1, ]
+compare_trn.df$Count <- as.numeric(compare_trn.df$Count)
+```
+
+Plot
+
+```{r}
+ggplot(compare_trn.df, aes(x = Mutant, y = Count, group = Group, fill = Group )) +
+  geom_bar(position = "stack", stat = "identity")
+```
+
+
+## Try various cutoffs for 1 mutant
+
+```{r}
+mut <- "BAS1"
+# JS divergence p-value cutoffs
+p_cutoffs <- c(0.001, 0.0005, 0.0001)
+# TF occupancy cutoffs
+tf_cutoffs <- c(-0.5, -0.75, -1)
+# Expression cutoffs
+e_cutoffs <- c(0.75, 0.85, 1, 1.2)
+
+# Iterate through chromatin cutoffs
+for (p in p_cutoffs) {
+  # Make predictions on both direct and indirect interactions (sig. chromatin)
+  sig_chrom.df <- sub_master.df %>%
+    filter(Mutant == mut) %>%
+    filter(lnorm_pvals < p)
+  sig_chrom.df$Nuc_Entropy <- as.numeric(calc_nuc_disorg(sig_chrom.df))
+  sig_chrom.df$Predicted_Microarray <- predict.lm(fit$finalModel, newdata = sig_chrom.df[, c("Subnuc_Norm", "Nuc_Norm", "Nuc_Entropy")])
+  print(paste0("Number of significant interactions: ", nrow(sig_chrom.df)))
+  
+  # Iterate through tf occupancy cutoffs for classifying TFBS/Direct effects
+  for (t in tf_cutoffs) {
+    sub_mut.df <- sig_chrom.df
+    # Classify direct effects with motif + significant TF occupancy decrease
+    sub_mut.df$DirectBinding <- ifelse(sub_mut.df$hasMotif == 1 & sub_mut.df$Subnuc_Norm <= t, 1, 0)
+    
+    # Change format for the mutant TF
+    chrom_mut.df <- sub_mut.df
+    chrom_mut.df$Mutant <- paste0(tolower(chrom_mut.df$Mutant), "\u0394")
+    # Check if a target is also a mutant; if so, change the formatting of the name
+    chrom_mut.df$Locus <- ifelse(chrom_mut.df$Locus %in% mutants$V1, paste0(tolower(chrom_mut.df$Locus), "\u0394"), chrom_mut.df$Locus)
+    
+    # Label edge type depending on direct/indirect effect
+    chrom_mut.df$edgetype <- as.factor(ifelse(chrom_mut.df$DirectBinding == 1, 2, 1))
+    
+    chrom_mut.df$pred_txn <- as.factor(ifelse(chrom_mut.df$Predicted_Microarray > 0, "Up", "Down"))
+    chrom_mut.df$txn <- as.factor(ifelse(chrom_mut.df$Microarray_FC > 0, "Up", "Down"))
+    
+    chrom_mut.df$Network <- "Chromatin"
+    
+    set.seed(999)
+    net <- graph_from_data_frame(chrom_mut.df[, c("Mutant", "Locus", "Predicted_Microarray", "DirectBinding", "edgetype", "pred_txn", "txn", "Microarray_FC")], directed = T)
+    net <- ggnetwork(asNetwork(net), arrow.gap = 0.085)
+    
+    # Iterate through microarray expression cutoffs
+    for (e in e_cutoffs) {
+      expr_mut.df <- subset(sub_master.df, Mutant %in% mut & (Microarray_FC > e | Microarray_FC < -e))
+
+      # Change format for the mutant TF
+      expr_mut.df$Mutant <- paste0(tolower(expr_mut.df$Mutant), "\u0394")
+      # Check if a target is also a mutant; if so, change the formatting of the name
+      expr_mut.df$Locus <- ifelse(expr_mut.df$Locus %in% mutants$V1, paste0(tolower(expr_mut.df$Locus), "\u0394"), expr_mut.df$Locus)
+      expr_mut.df$txn <- as.factor(ifelse(expr_mut.df$Microarray_FC > 0, "Up", "Down"))
+      
+      expr_mut.df$Network <- "Expression"
+      
+      set.seed(999)
+      expr_net <- graph_from_data_frame(expr_mut.df[, c("Mutant", "Locus", "Microarray_FC", "txn")], directed = T)
+      expr_net <- ggnetwork(asNetwork(expr_net), arrow.gap = 0.085)
+      
+      # Label nodes if they also exist in the chromatin TRN
+      expr_net$Overlap_TRN <- ifelse(expr_net$vertex.names %in% net$vertex.names, "Overlap", "No_Overlap")
+      # Label the main node
+      expr_net$Overlap_TRN <- ifelse(grepl("\u0394", expr_net$vertex.names), "Mutant", expr_net$Overlap_TRN)
+      
+      orig_trn <- ggplot(expr_net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+        geom_edges(data = subset(expr_net, txn == "Up"), aes(color = txn), arrow = arrow(length = unit(6, "pt"), type = "closed")) +
+        geom_edges(data = subset(expr_net, txn == "Down"), aes(color = txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90)) +
+        scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96")) + 
+        geom_nodes(data = subset(expr_net, Overlap_TRN == "No_Overlap"), color = "grey50", size = 16) +
+        geom_nodes(data = subset(expr_net, Overlap_TRN == "No_Overlap"), color = "grey50", size = 20, alpha = 0.4) +
+        new_scale_color() + 
+        geom_nodes(data = subset(expr_net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 16) + 
+        geom_nodes(data = subset(expr_net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 20, alpha = 0.4) + 
+        geom_nodes(data = subset(expr_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 16) + 
+        geom_nodes(data = subset(expr_net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 20, alpha = 0.4) + 
+        geom_nodetext(aes(label = vertex.names), color = "white") + 
+        theme_blank() + 
+        theme(plot.title = element_text(hjust = 0.5), 
+              legend.position = "none") + 
+        labs(title = "Expression-based TRN") + 
+        coord_cartesian(clip = "off")
+      
+      # Label nodes if they also exist in the chromatin TRN
+      net$Overlap_TRN <- ifelse(net$vertex.names %in% expr_net$vertex.names, "Overlap", "No_Overlap")
+      # Label the main node
+      net$Overlap_TRN <- ifelse(grepl("\u0394", net$vertex.names), "Mutant", net$Overlap_TRN)
+      
+      inferred_trn <- ggplot(net, aes(x = x, y = y, xend = xend, yend = yend)) + 
+        geom_edges(data = subset(net, pred_txn == "Up"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(6, "pt"), type = "closed")) +
+        geom_edges(data = subset(net, pred_txn == "Down"), aes(linetype = edgetype, color = pred_txn), arrow = arrow(length = unit(0.2, "cm"), angle = 90)) +
+        scale_color_manual(values = c("Up" = "#bf212f", "Down" = "#264b96")) + 
+        geom_nodes(data = subset(net, Overlap_TRN == "No_Overlap"), color = "grey50", size = 16) +
+        geom_nodes(data = subset(net, Overlap_TRN == "No_Overlap"), color = "grey50", size = 20, alpha = 0.4) +
+        new_scale_color() + 
+        geom_nodes(data = subset(net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 16) + 
+        geom_nodes(data = subset(net, Overlap_TRN == "Overlap"), color = "#FAC898", size = 20, alpha = 0.4) +
+        geom_nodes(data = subset(net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 16) + 
+        geom_nodes(data = subset(net, Overlap_TRN == "Mutant"), color = "#C3B1E1", size = 20, alpha = 0.4) + 
+        geom_nodetext(aes(label = vertex.names), color = "white") + 
+        theme_blank() + 
+        theme(plot.title = element_text(hjust = 0.5), 
+              legend.position = "none") + 
+        labs(title = "Inferred TRN from Chromatin") + 
+        coord_cartesian(clip = "off")
+      
+      patch <- orig_trn + plot_spacer() + inferred_trn + plot_layout(widths = c(1, 0.1, 1)) + 
+        plot_annotation(title = paste0(tolower(mut[1]), "\u0394", "_p_", p, "_tf_", t, "_e_", e), 
+                        theme = theme(plot.title = element_text(face = "bold.italic", hjust = 0.5, size = 20)))
+      ggsave(patch, filename = paste0("/Users/kmoyung/trn_inference/", paste(mut, collapse = "_"), "_p_", p, "_tf_", t, "_e_", e, "_TRN.png"), dpi = 800, width = 10, height = 5.5)
+    }
+    
+  }
+}
+
+```
+
+Sensitivity analysis of expression vs. chromatin cutoff
+
+```{r}
+mut <- "BAS1"
+# JS divergence p-value cutoffs
+p_cutoffs <- c(0.001, 0.0005, 0.0001, 0.00005, 0.00001)
+# p_cutoffs <- seq(0.000001, 0.01, 0.0005)
+# TF occupancy cutoffs
+tf_cutoffs <- c(-0.5, -0.75, -1)
+# Expression cutoffs
+e_cutoffs <- c(0.75, 0.85, 1, 1.2, 1.5)
+# e_cutoffs <- seq(0.5, 2, 0.05)
+
+# DF to store the values for each variable
+cutoffs.df <- data.frame(p_cutoffs = 0, e_cutoffs = 0, overlap = 0)
+
+# Iterate through chromatin cutoffs
+for (p in p_cutoffs) {
+  # Make predictions on both direct and indirect interactions (sig. chromatin)
+  sig_chrom.df <- sub_master.df %>%
+    filter(Mutant == mut) %>%
+    filter(lnorm_pvals < p)
+  sig_chrom.df$Nuc_Entropy <- as.numeric(calc_nuc_disorg(sig_chrom.df))
+  sig_chrom.df$Predicted_Microarray <- predict.lm(fit$finalModel, newdata = sig_chrom.df[, c("Subnuc_Norm", "Nuc_Norm", "Nuc_Entropy")])
+  # print(paste0("Number of significant interactions: ", nrow(sig_chrom.df)))
+  
+  # TF cutoff
+  t <- -0.75
+ 
+  sub_mut.df <- sig_chrom.df
+  # Classify direct effects with motif + significant TF occupancy decrease
+  sub_mut.df$DirectBinding <- ifelse(sub_mut.df$hasMotif == 1 & sub_mut.df$Subnuc_Norm <= t, 1, 0)
+  
+  # Change format for the mutant TF
+  chrom_mut.df <- sub_mut.df
+  chrom_mut.df$Mutant <- paste0(tolower(chrom_mut.df$Mutant), "\u0394")
+  # Check if a target is also a mutant; if so, change the formatting of the name
+  chrom_mut.df$Locus <- ifelse(chrom_mut.df$Locus %in% mutants$V1, paste0(tolower(chrom_mut.df$Locus), "\u0394"), chrom_mut.df$Locus)
+  
+  # Label edge type depending on direct/indirect effect
+  chrom_mut.df$edgetype <- as.factor(ifelse(chrom_mut.df$DirectBinding == 1, 2, 1))
+  
+  chrom_mut.df$pred_txn <- as.factor(ifelse(chrom_mut.df$Predicted_Microarray > 0, "Up", "Down"))
+  chrom_mut.df$txn <- as.factor(ifelse(chrom_mut.df$Microarray_FC > 0, "Up", "Down"))
+  
+  chrom_mut.df$Network <- "Chromatin"
+  
+  set.seed(999)
+  net <- graph_from_data_frame(chrom_mut.df[, c("Mutant", "Locus", "Predicted_Microarray", "DirectBinding", "edgetype", "pred_txn", "txn", "Microarray_FC")], directed = T)
+  net <- ggnetwork(asNetwork(net), arrow.gap = 0.085)
+  
+  # Iterate through microarray expression cutoffs
+  for (e in e_cutoffs) {
+    expr_mut.df <- subset(sub_master.df, Mutant %in% mut & (Microarray_FC > e | Microarray_FC < -e))
+
+    # Change format for the mutant TF
+    expr_mut.df$Mutant <- paste0(tolower(expr_mut.df$Mutant), "\u0394")
+    # Check if a target is also a mutant; if so, change the formatting of the name
+    expr_mut.df$Locus <- ifelse(expr_mut.df$Locus %in% mutants$V1, paste0(tolower(expr_mut.df$Locus), "\u0394"), expr_mut.df$Locus)
+    expr_mut.df$txn <- as.factor(ifelse(expr_mut.df$Microarray_FC > 0, "Up", "Down"))
+    
+    expr_mut.df$Network <- "Expression"
+    
+    set.seed(999)
+    expr_net <- graph_from_data_frame(expr_mut.df[, c("Mutant", "Locus", "Microarray_FC", "txn")], directed = T)
+    expr_net <- ggnetwork(asNetwork(expr_net), arrow.gap = 0.085)
+    
+    # Label nodes if they also exist in the chromatin TRN
+    expr_net$Overlap_TRN <- ifelse(expr_net$vertex.names %in% net$vertex.names, "Overlap", "No_Overlap")
+    # Label the main node
+    expr_net$Overlap_TRN <- ifelse(grepl("\u0394", expr_net$vertex.names), "Mutant", expr_net$Overlap_TRN)
+    
+    # Label nodes if they also exist in the chromatin TRN
+    net$Overlap_TRN <- ifelse(net$vertex.names %in% expr_net$vertex.names, "Overlap", "No_Overlap")
+    # Label the main node
+    net$Overlap_TRN <- ifelse(grepl("\u0394", net$vertex.names), "Mutant", net$Overlap_TRN)
+    
+    cutoffs.df <- rbind(cutoffs.df, c(p, e, as.numeric(table(net$Overlap_TRN)["Overlap"])))
+    
+  }
+    
+}
+
+cutoffs.df <- cutoffs.df[-1, ]
+```
+
+Plot
+
+```{r}
+sens_plot <- ggplot(cutoffs.df, aes(x = as.factor(p_cutoffs), y = as.factor(e_cutoffs), color = overlap)) + 
+  geom_point(size = 5) + 
+  scale_color_viridis() + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 70, hjust = 1), 
+        plot.title = element_text(face = "bold.italic")) + 
+  labs(y = "Expression Cutoffs", x = "Chromatin P-Value Cutoffs", color = "# of Overlaps", 
+       title = paste0(tolower(mut), "\u0394"))
+
+sens_plot
+ggsave(sens_plot, filename = "/Users/kmoyung/Desktop/chrom_vs_expr2.png", dpi = 800, width = 3, height = 3)
+```
+
+## Test: Plot inferred TRN in a different layout (TF and nucleosomes)
+
+```{r}
+mut <- c("BAS1")
+sub_mut.df <- subset(sig_chrom.df, Mutant %in% mut)
+
+# Classify direct effects with motif + significant TF occupancy decrease
+cutoff <- -0.5
+# sub_mut.df$DirectBinding <- ifelse(sub_mut.df$hasMotif == 1 & sub_mut.df$Subnuc_Norm <= cutoff, 1, 0)
+sub_mut.df$DirectBinding <- ifelse(sub_mut.df$hasMotif == 1 & sub_mut.df$TF_Change <= cutoff, 1, 0)
+
+# Calculate a nucleosome "score" vs. tf "score" for x and y axes based on the learned LM coefficients
+sub_mut.df$TF_Score <- sub_mut.df$Subnuc_Norm * fit$coefficients[2]
+sub_mut.df$Nuc_Score <- (sub_mut.df$Nuc_Norm * fit$coefficients[3]) + 
+  (sub_mut.df$Nuc_Entropy * fit$coefficients[4])
+
+
+mech_trn <- ggplot(sub_mut.df, aes(x = TF_Score, y = Nuc_Score, fill = Predicted_Microarray)) + 
+  theme_bw() +
+  theme(panel.grid = element_blank(), 
+        panel.border = element_blank(), 
+        legend.position = "none") + 
+  scale_fill_gradient2(low = "#0091ff", high = "#f0650e", midpoint = 0, limits = c(-1, 1), oob = scales::squish) +
+  coord_cartesian(xlim = c(-max(abs(sub_mut.df$TF_Score), na.rm = T), max(abs(sub_mut.df$TF_Score), na.rm = T)), ylim = c(-max(abs(sub_mut.df$Nuc_Score), na.rm = T), max(abs(sub_mut.df$Nuc_Score), na.rm = T)), clip = "off") + 
+  geom_hline(yintercept = 0, lty = 1, color = "grey75", alpha = 0.5) +
+  geom_vline(xintercept = 0, lty = 1, color = "grey75", alpha = 0.5) +
+  geom_segment(data = subset(sub_mut.df, DirectBinding == 1), aes(x = 0, y = 0, xend = TF_Score, yend = Nuc_Score)) +
+  geom_segment(data = subset(sub_mut.df, DirectBinding == 0), aes(x = 0, y = 0, xend = TF_Score, yend = Nuc_Score), lty = 2) +
+  geom_label(aes(label = Locus), size = 5) + 
+  geom_label(x = 0, y = 0, label = paste0(tolower(mut), "\u0394"), fill = "yellow", size = 5) +
+  labs(x = "TF Score", y = "Nuc Score")
+print(mech_trn)
+ggsave(mech_trn, filename = paste0("/Users/kmoyung/Desktop/", paste(mut, collapse = "_"), "_TRN_mech.png"), dpi = 800, width = 5, height = 5)
+```

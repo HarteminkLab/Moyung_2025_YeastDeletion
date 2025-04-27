@@ -1,0 +1,950 @@
+---
+title: "Analyze Replicate Mutants"
+output: html_notebook
+---
+
+# Combine all the mutant quantifications with other datasets
+
+```{r}
+# Source the base code and functions
+if (Sys.info()[['sysname']] == "Windows") {
+  source("C:/Users/Kevin/Desktop/MacAlpine_KM/Code/get_midpoints.R")
+  gene.df = read.csv("D:/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv",header = T)
+} else {
+  gene.df = read.csv("/Users/kmoyung/MacAlpine_KM/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv", header = T)
+  source("/Users/kmoyung/MacAlpine_KM/Code/get_midpoints.R")
+}
+
+# Filter out genes with low MNase-seq coverage (must have > 70% read coverage)
+filtered_genes <- fread("/Users/kmoyung/MacAlpine_KM/Metadata/filtered_genes_70coverage.txt", header = T)
+```
+
+## Load the master dataframe
+
+```{r}
+old_master.df <- readRDS("/Users/kmoyung/Desktop/master_diff_length_corrected.RDS")
+```
+
+## Load mutant list
+
+```{r}
+replicate_mutants <- read.delim("/Users/kmoyung/Downloads/Rep_Mutants_List_All.txt", header = F)
+muts_list <- unique(sub("_Rep\\d+", "", replicate_mutants$V1))
+
+# # Remove bad replicates
+# replicate_mutants <- read.delim("/Users/kmoyung/Downloads/Rep_Mutants_List_Cleaned.txt", header = F)
+# muts_list <- unique(sub("_Rep\\d+", "", replicate_mutants$V1))
+```
+
+## Compile all mutants into one dataframe
+
+```{r}
+for (i in 1:nrow(replicate_mutants)) {
+  mut <- replicate_mutants$V1[i]
+  # diff.df <- readRDS(paste0("/Users/kmoyung/mutant_diffs_v4/", mut, "_quantifications.RDS"))
+  diff.df <- readRDS(paste0("/Users/kmoyung/mutant_diffs_replicates/", mut, "_quantifications_length_corrected.RDS"))
+  diff.df <- diff.df[diff.df$Locus %in% filtered_genes$x, ]
+  
+  diff.df$Mutant <- mut
+  
+  if (i == 1) {
+    master.df <- diff.df
+  } else {
+    master.df <- rbind(master.df, diff.df)
+  }
+}
+```
+
+Remove NaN's and infinite values
+
+```{r}
+# Remove rows with infinite values
+master.df <- master.df[is.finite(master.df$Subnuc_Change), ]
+master.df <- master.df[is.finite(master.df$Promnuc_Change), ]
+master.df <- master.df[is.finite(master.df$Nuc_Change), ]
+master.df <- master.df[is.finite(master.df$PromJS), ]
+master.df <- master.df[is.finite(master.df$WindowJS), ]
+master.df <- master.df[is.finite(master.df$GeneJS), ]
+master.df <- master.df[is.finite(master.df$TermJS), ]
+master.df <- master.df[is.finite(master.df$Term_Subnuc_Change), ]
+master.df <- master.df[is.finite(master.df$Term_Nuc_Change), ]
+```
+
+## Remove genes with length <= 500bp (these short genes tend to throw off the quantification metrics)
+
+```{r}
+# Plot gene lengths with median JS divergence
+gene_js.df <- master.df %>% 
+  group_by(Locus) %>%
+  mutate(Median_JS = median(WindowJS))
+
+gene_js.df <- gene_js.df[, c("Locus", "Median_JS")]
+gene_js.df <- unique(gene_js.df)
+gene_length.df <- data.frame(Locus = gene.df$alias, Length = (gene.df$right_coord - gene.df$left_coord))
+gene_js.df <- merge(gene_js.df, gene_length.df)
+
+short_genes <- subset(gene_js.df, Length <= 500)
+
+master.df <- subset(master.df, !(Locus %in% short_genes$Locus))
+```
+
+## Normalize by the total number of subnuc counts across all genes for each mutant
+
+```{r}
+# Calculate total occupancies across all genes per mutant
+per_mutant_occupancy.df <- master.df %>%
+  group_by(Mutant) %>%
+  summarise(Total_Mut_Subnucs = sum(Mut_Subnucs), 
+            Total_Control_Subnucs = sum(Control_Subnucs), 
+            Total_Mut_Promnucs = sum(Mut_Promnucs), 
+            Total_Control_Promnucs = sum(Control_Promnucs), 
+            Total_Mut_Nucs = sum(Mut_Nucs), 
+            Total_Control_Nucs = sum(Control_Nucs), 
+            Total_Term_Mut_Subnucs = sum(Term_Mut_Subnucs), 
+            Total_Term_Control_Subnucs = sum(Term_Control_Subnucs), 
+            Total_Term_Mut_Nucs = sum(Term_Mut_Nucs), 
+            Total_Term_Control_Nucs = sum(Term_Control_Nucs))
+```
+
+```{r}
+# Normalize the occupancies by their totals (of all genes) and compute the new fold changes
+master.df <- merge(master.df, per_mutant_occupancy.df, by = "Mutant")
+
+master.df$Subnuc_Norm <- log2((master.df$Mut_Subnucs / master.df$Total_Mut_Subnucs) / (master.df$Control_Subnucs / master.df$Total_Control_Subnucs))
+master.df$Promnuc_Norm <- log2((master.df$Mut_Promnucs / master.df$Total_Mut_Promnucs) / (master.df$Control_Promnucs / master.df$Total_Control_Promnucs))
+master.df$Nuc_Norm <- log2((master.df$Mut_Nucs / master.df$Total_Mut_Nucs) / (master.df$Control_Nucs / master.df$Total_Control_Nucs))
+master.df$Term_Subnuc_Norm <- log2((master.df$Term_Mut_Subnucs / master.df$Total_Term_Mut_Subnucs) / (master.df$Term_Control_Subnucs / master.df$Total_Term_Control_Subnucs))
+master.df$Term_Nuc_Norm <- log2((master.df$Term_Mut_Nucs / master.df$Total_Term_Mut_Nucs) / (master.df$Term_Control_Nucs / master.df$Total_Term_Control_Nucs))
+```
+
+## Fit the JS scores to a lognormal and gamma distribution and compute p-values
+
+```{r}
+library(fitdistrplus)
+master.df <- master.df %>%
+  group_by(Mutant) %>%
+  mutate(lnorm_pvals = plnorm(WindowJS, meanlog = fitdist(WindowJS, "lnorm")$estimate[1], sdlog = fitdist(WindowJS, "lnorm")$estimate[2], lower.tail = F))
+```
+
+## Verify these mutants
+
+```{r}
+# verify.df <- subset(master.df, Mutant %in% c(paste0(muts_list, "_Rep1"), paste0(muts_list, "_Rep2")) & Locus %in% muts_list)
+# 
+# View(subset(master.df, Mutant %in% c("HAP2_Rep1", "HAP2_Rep2") & Locus == "HAP2"))
+```
+
+
+## Join with original mutant data (19 mutants)
+
+```{r}
+library(pheatmap)
+
+merged_mut.df <- old_master.df %>%
+  filter(Mutant %in% muts_list) %>%
+  bind_rows(master.df)
+
+ggplot(subset(merged_mut.df, Mutant %in% c("GAL80", "GAL80_Rep1", "GAL80_Rep2", "CBF1", "CBF1_Rep1", "CBF1_Rep2") & Locus %in% c("GAL1", "GAL10")), 
+       aes(x = Mutant, y = Nuc_Norm, fill = Mutant)) + 
+  geom_bar(stat = "identity", alpha = 0.25) + 
+  facet_wrap(.~Locus)
+
+ggplot(subset(merged_mut.df, Mutant %in% c("GAL80", "GAL80_Rep1", "GAL80_Rep2", "CBF1", "CBF1_Rep1", "CBF1_Rep2") & Locus %in% c("GAL1", "GAL10")), 
+       aes(x = Mutant, y = -log10(lnorm_pvals), fill = Mutant)) + 
+  geom_bar(stat = "identity", alpha = 0.25) + 
+  facet_wrap(.~Locus)
+```
+
+
+## Save merged replicates file
+
+```{r}
+saveRDS(merged_mut.df, file = "/Users/kmoyung/Desktop/rep_diff_merged.RDS")
+```
+
+
+## Identify top interactions that are shared across all three replicates
+
+```{r}
+top.df <- subset(merged_mut.df, lnorm_pvals < 0.05)[, c("Mutant", "Locus", "WindowJS", "lnorm_pvals")] %>%
+  mutate(Orig_Mutant = sub("_Rep\\d+", "", Mutant)) %>%
+  group_by(Orig_Mutant, Locus) %>%
+  summarise(count = n()) %>%
+  dplyr::filter(count == 3)
+```
+
+
+## Plot JS p-value across known mutant-gene interactions by their replicates
+
+```{r}
+known_targets <- c("ARB1", "ADE5,7", "ARG8", "ARG8", "HIS4", "MET5", "GLY1", "GAL10", "FIT3", "RRN7", "HXT3", "YPC1", "HEM13", "FIT3", "POM34", "PXL1", "PRY1", "RRP6", "CBF1")
+
+plots <- list()
+for (i in 1:length(known_targets)) {
+  known_plot <- ggplot(subset(merged_mut.df, Mutant %in% c(muts_list[i], paste0(muts_list[i], "_Rep1"), paste0(muts_list[i], "_Rep2")) & Locus == known_targets[i]), aes(x = Mutant, y = -log(lnorm_pvals), fill = Mutant)) +
+    theme_minimal() + 
+    geom_bar(stat = "identity", alpha = 0.45, color = "black") + 
+    geom_hline(yintercept = 3, linetype = "dashed") +
+    theme(legend.position = "none", 
+          axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+          plot.title = element_text(hjust = 0.5, face = "bold.italic")) + 
+    labs(x = "", y = expression(-log[10]~(p)), title = paste0(tolower(muts_list[i]), "\u0394", "-", known_targets[i]))
+  
+  plots[[i]] <- known_plot
+}
+
+patch <- wrap_plots(plots, ncol = 5)
+patch
+
+ggsave(patch, filename = "/Users/kmoyung/Desktop/replicate_verficiation_supp.png", dpi = 800, width = 8, height = 8)
+```
+
+## Plot typhoon plots of GAL80 replicates and BAS1 replicates
+
+Override existing functions
+
+```{r}
+library(gggenes)
+# Plot genes using the gggenes package
+plot_genes <- function(locus, start, end) {
+  geneplot <- ggplot(subset(gene.df, alias %in% locus),
+                       aes(xmin = left_coord, xmax = right_coord, y = 1, forward = ifelse(strand == "+", 1, 0), label = locus)) +
+      geom_gene_arrow(fill = "grey90", arrow_body_height = grid::unit(6, "mm"), 
+                      arrowhead_height = unit(6, "mm"), 
+                      arrowhead_width = unit(1, "mm")) +
+      geom_feature(aes(x = ifelse(strand == "+", left_coord, right_coord), forward = ifelse(strand == "+", 1, 0), y = 1), 
+                   feature_height = unit(6, "mm")) + 
+      geom_gene_label(align = ifelse(strand == "+", "left", "right"), fontface = "bold.italic") +
+      theme_void() +
+      coord_cartesian(xlim = c(start, end), clip = "on", expand = c(0,0))
+  return(geneplot)
+}
+
+## get_samples(mut): Returns a list of dataframes of reads, one df for every chromosome
+get_samples <- function(mut, set_chr, ref_mut) {
+  # Check if we want a specific chr or all the chrs
+  if (set_chr != "all") {
+    cur_chr <- set_chr
+    chr_start <- coordinates[match(cur_chr, coordinates$Chr), "Start"]
+    chr_end <- coordinates[match(cur_chr, coordinates$Chr), "End"]
+    mid.df <- get_midpoint_dataframe(mut, cur_chr, chr_start, chr_end)
+    
+    ## OPTIONAL: Sample the current mutant to the same library size as the ref mutant
+    min_chr_depths <- subset(total_reads.df, Mutant == ref_mut)
+    cur_depth = min_chr_depths[min_chr_depths$Chr == cur_chr, "Count"]
+    mid.df <- sample_n(mid.df, size = cur_depth, replace = T)
+    
+    # Truncate locations with more than n duplicate reads in the sample
+    depth <- mut_reads.df[mut_reads.df$Mutant == mut, "Count"]
+    n_dupes <- ceiling(depth / 4000000)
+    mid.dt <- as.data.table(mid.df)
+    freq_mid.dt <- mid.dt[, .N, by=names(mid.dt)]
+    freq_mid.dt[freq_mid.dt$N > n_dupes, "N"] <- n_dupes
+    filtered_mid.df <- data.frame(freq_mid.dt[rep(seq_len(dim(freq_mid.dt)[1]), freq_mid.dt$N), 1:2, drop = FALSE], row.names=NULL)
+    
+    return(filtered_mid.df)
+  } else {
+    samples <- list()
+    for (cur_chr in chrs) {
+      chr_start <- coordinates[match(cur_chr, coordinates$Chr), "Start"]
+      chr_end <- coordinates[match(cur_chr, coordinates$Chr), "End"]
+      mid.df <- get_midpoint_dataframe(mut, cur_chr, chr_start, chr_end)
+      
+      ## OPTIONAL: Sample the current mutant to the same library size as the ref mutant
+      min_chr_depths <- subset(total_reads.df, Mutant == ref_mut)
+      cur_depth = min_chr_depths[min_chr_depths$Chr == cur_chr, "Count"]
+      mid.df <- sample_n(mid.df, size = cur_depth, replace = T)
+      
+      # Truncate locations with more than n duplicate reads in the sample
+      depth <- mut_reads.df[mut_reads.df$Mutant == mut, "Count"]
+      n_dupes <- ceiling(depth / 4000000)
+      mid.dt <- as.data.table(mid.df)
+      freq_mid.dt <- mid.dt[, .N, by=names(mid.dt)]
+      freq_mid.dt[freq_mid.dt$N > n_dupes, "N"] <- n_dupes
+      filtered_mid.df <- data.frame(freq_mid.dt[rep(seq_len(dim(freq_mid.dt)[1]), freq_mid.dt$N), 1:2, drop = FALSE], row.names=NULL)
+      
+      samples[[cur_chr]] <- filtered_mid.df
+    }
+    return(samples)
+  }
+  
+}
+
+# Plot sample typhoon plot
+plot_sample_typhoon <- function(mut, chr, start, end, ref_mut, prom_start, prom_end) {
+  
+  # Get the control df
+  mid.df <- get_samples(mut, chr, ref_mut)
+  
+  # Get the control df
+  control.df <- get_controls(chr, "CBF1")
+  
+  # Re-sample by fragment length distribution in the control
+  mid.df <- sample_by_fragment_length(mid.df, control.df)
+  
+  # Subset for the locus
+  mid.df <- subset(mid.df, mid >= start & mid <= end)
+  
+  # Calculate smoothed density values
+  mid.df$density <- get_density(mid.df$mid, mid.df$length, 
+                                         n = 200, 
+                                         h = c(25, 30))
+  
+  # Calculate color scale limit based on window length
+  color_lim <- c(0, 0.08 / (end - start))
+  
+  plot_sample <- ggplot(mid.df[order(mid.df$density), ]) + 
+    # annotate("rect", xmin = prom_start, xmax = prom_end, ymin = 0, ymax = 250, fill = "#8073AC", alpha = 0.2) + 
+    # geom_rect(xmin = prom_start, xmax = prom_end, ymin = 0, ymax = 250, fill = "#8073AC", alpha = 0.2) + 
+    # geom_point(aes(x = mid, y = length), size = 0.45, shape = 20, fill = "gray") +
+    geom_point(aes(x = mid, y = length, color = density), size = 0.45, shape = 20) +
+    # scale_color_gradientn(colors = rev(magma(6)[-1]), limits = c(0, 0.00003), oob = scales::squish) + 
+    scale_color_gradientn(colors = rev(magma(6)[-1]), limits = color_lim, oob = scales::squish) + 
+    ggtitle(paste0(tolower(mut), "\u0394")) +
+    theme_bw() +
+    theme(panel.grid = element_blank(), 
+          legend.position = "none", 
+          plot.title = element_text(face = "italic", hjust = 0.5), 
+          axis.title.y = element_blank(), 
+          axis.text.x = element_blank(), 
+          axis.ticks.x = element_blank(), 
+          axis.text.y = element_text(size = 12)) + 
+    labs(y = "Length", x = paste0(chr, ":", start, "-", end), color = "Density") +
+    coord_cartesian(xlim = c(start, end), expand = c(0, 0))
+  
+  return(plot_sample)
+}
+
+# Plot control typhoon plot
+plot_control_typhoon <- function(chr, start, end, mut, prom_start, prom_end) {
+  # Get the control df
+  control.df <- get_controls(chr, mut)
+  
+  # Subset for the locus
+  control.df <- subset(control.df, mid >= start & mid <= end)
+  
+  # Calculate smoothed density values
+  control.df$density <- get_density(control.df$mid, control.df$length,
+                                    n = 200,
+                                    h = c(25, 30))
+  
+  # Calculate color scale limit based on window length
+  color_lim <- c(0, 0.08 / (end - start))
+  
+  plot_control <- ggplot(control.df[order(control.df$density), ]) +
+    # annotate("rect", xmin = prom_start, xmax = prom_end, ymin = 0, ymax = 250, fill = "#8073AC", alpha = 0.2) + 
+    # geom_rect(xmin = prom_start, xmax = prom_end, ymin = 0, ymax = 250, fill = "#8073AC", alpha = 0.2) + 
+    # geom_point(aes(x = mid, y = length), size = 0.45, shape = 20, fill = "gray") +
+    geom_point(aes(x = mid, y = length, color = density), size = 0.45, shape = 20) +
+    # scale_color_gradientn(colors = rev(magma(6)[-1]), limits = c(0, 0.00003), oob = scales::squish) + 
+    scale_color_gradientn(colors = rev(magma(6)[-1]), limits = color_lim, oob = scales::squish) + 
+    ggtitle(paste0("Control")) +
+    theme_bw() +
+    theme(panel.grid = element_blank(), 
+          legend.position = "none", 
+          plot.title = element_text(hjust = 0.5), 
+          axis.title.y = element_blank(), 
+          axis.text.x = element_blank(), 
+          axis.ticks.x = element_blank(), 
+          axis.text.y = element_text(size = 12)) +
+    labs(y = "Length", x = chr, color = "Density") +
+    coord_cartesian(xlim = c(start, end), expand = c(0, 0))
+  
+  return(plot_control)
+}
+
+
+# Plot motif locations
+# muts: list of mutant tfs
+# locus: location to narrow down on
+plot_motif <- function(muts, locus, start, end) {
+  sub_motifs.df <- subset(all_fimo.df, motif_id %in% muts & Gene == locus)
+  sub_rossi.df <- subset(rossi.df, toupper(name) %in% muts & Target == locus)
+  sub_macisaac.df <- subset(macisaac.df, toupper(alias) %in% muts & Target == locus)
+  
+  return(ggplot(sub_rossi.df, aes(x = midpoint, y = 1, fill = name)) + 
+    geom_point(shape = 25, color = "black", size = 5, alpha = 0.6) + 
+    theme_void() + 
+    theme(legend.position = "none") + 
+    coord_cartesian(xlim = c(start, end), expand = c(0, 0)))
+}
+```
+
+Append replicate DM numbers to mutants
+
+```{r}
+mutants <- rbind(mutants, c("GAL80_Rep1", 1704), c("GAL80_Rep2", 1709), c("BAS1_Rep1", 1706), c("BAS1_Rep2", 1711))
+```
+
+Plot GAL80
+
+```{r}
+muts <- c("GAL80", "GAL80_Rep1", "GAL80_Rep2")
+# locus <- c("GAL10")
+locus <- c("GAL1")
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+offset <- 500
+
+if (strand == "+") {
+  start <- coords$tss[1] - 300 - offset
+  end <- coords$tss[1] + 750 + offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1] + 500
+} else {
+  start <- coords$tss[1] - 750 - offset
+  end <- coords$tss[1] + 300 + offset
+  prom_start <- coords$tss[1] - 500
+  prom_end <- coords$tss[1] + 250
+}
+
+# Add "plot" for global y-axis
+yaxis <- ggplot(data.frame(l = "Fragment Length", x = 1, y = 1)) +
+      geom_text(aes(x, y, label = l), angle = 90, size = 5) + 
+      theme_void() +
+      coord_cartesian(clip = "off")
+
+geneplot <- plot_genes(locus, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, muts[1], prom_start, prom_end) + theme(axis.title.x = element_blank())
+sampleplot1 <- plot_sample_typhoon(muts[1], chr, start, end, muts[1], prom_start, prom_end) +
+  theme(axis.title.x = element_blank())
+sampleplot2 <- plot_sample_typhoon(muts[2], chr, start, end, muts[1], prom_start, prom_end) +
+  theme(axis.title.x = element_blank()) 
+sampleplot3 <- plot_sample_typhoon(muts[3], chr, start, end, muts[1], prom_start, prom_end)
+
+patch <- wrap_plots(geneplot, plot_spacer(), controlplot, sampleplot1, sampleplot2, sampleplot3, ncol = 1, nrow = (length(muts) + 3), heights = c(1.5, -0.5, 1, 1, 1, 1)) + plot_layout(guides = "collect", widths = c(0.1, 1))
+
+patch
+ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/multi_typhoon_", locus,"_locus_new.png"), width = 4.5, height = (length(muts) * 15 / 6), dpi = 800)
+```
+
+Plot BAS1
+
+```{r}
+muts <- c("BAS1", "BAS1_Rep1", "BAS1_Rep2")
+locus <- c("HIS4")
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+offset <- 500
+
+if (strand == "+") {
+  start <- coords$tss[1] - 300 - offset
+  end <- coords$tss[1] + 750 + offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1] + 500
+} else {
+  start <- coords$tss[1] - 750 - offset
+  end <- coords$tss[1] + 300 + offset
+  prom_start <- coords$tss[1] - 500
+  prom_end <- coords$tss[1] + 250
+}
+
+# Add "plot" for global y-axis
+yaxis <- ggplot(data.frame(l = "Fragment Length", x = 1, y = 1)) +
+      geom_text(aes(x, y, label = l), angle = 90, size = 5) + 
+      theme_void() +
+      coord_cartesian(clip = "off")
+
+geneplot <- plot_genes(locus, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, muts[1], prom_start, prom_end) + theme(axis.title.x = element_blank())
+sampleplot1 <- plot_sample_typhoon(muts[1], chr, start, end, muts[1], prom_start, prom_end) +
+  theme(axis.title.x = element_blank())
+sampleplot2 <- plot_sample_typhoon(muts[2], chr, start, end, muts[1], prom_start, prom_end) +
+  theme(axis.title.x = element_blank()) 
+sampleplot3 <- plot_sample_typhoon(muts[3], chr, start, end, muts[1], prom_start, prom_end)
+
+patch <- wrap_plots(geneplot, plot_spacer(), controlplot, sampleplot1, sampleplot2, sampleplot3, ncol = 1, nrow = (length(muts) + 3), heights = c(1.5, -0.5, 1, 1, 1, 1)) + plot_layout(guides = "collect", widths = c(0.1, 1))
+
+patch
+ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/multi_typhoon_", locus,"_locus_new.png"), width = 4.5, height = (length(muts) * 15 / 6), dpi = 800)
+```
+
+## Plot volcano plots of all mutants
+
+```{r}
+library(ggrepel)
+library(ggpointdensity)
+# selected_muts <- c("GAL80", "ARG81", "PHO85", "BAS1", "PPR1", "CBF1", "RFX1", "ROX1", "SWI6")
+selected_muts <- muts_list
+
+# Label selected genes in the manuscript
+selected_loci <- c("GAL1", "GAL10", "GAL2", "ARG8", "ARG5,6", "ADE17", "HIS4", "SHM2", "GCV1", "CWC21", "KRE2", "MET3", "MET10")
+
+selected_loci <- c(selected_loci, known_targets)
+selected_loci <- unique(selected_loci)
+
+# Merge replicate lnorm_pvals by taking median
+merged_replicates.df <- merged_mut.df[, c("Mutant", "Locus", "lnorm_pvals")] %>%
+  mutate(Orig_Mutant = sub("_Rep\\d+", "", Mutant)) %>%
+  group_by(Orig_Mutant, Locus) %>%
+  summarize(median_pvals = median(lnorm_pvals, na.rm = T)) %>%
+  filter(Orig_Mutant != Locus) %>%
+  left_join(old_master.df[, c("Mutant", "Locus", "Microarray_FC")], by = c("Orig_Mutant" = "Mutant", "Locus"))
+
+# Define the Laplace probability density function (PDF) with a scaling factor
+laplace_pdf <- function(x, mu, b, peak) {
+  return(peak * (1/(2*b) * exp(-abs(x - mu)/b)))
+}
+
+# Create a separate dataframe with the general x and y values
+x <- c(-4, -3, -1, 0, 1, 3, 4)
+y <- c(0, 0, 2.5, 10, 2.5, 0, 0)
+df <- data.frame(x, y)
+
+# Generate points for plotting the fitted curve
+scale_factor <- 10
+beta <- 1
+# curve_data <- data.frame(x = seq(min(df$x), max(df$x), length.out = 101))
+curve_data <- data.frame(x = seq(min(df$x), max(df$x), length.out = 33))
+curve_data$y <- laplace_pdf(curve_data$x, 0, beta, scale_factor)
+
+# P-value threshold
+p <- 0.05
+# p <- 0.0001
+# Expression threshold
+e <- 0.5
+# Label points based on the laplacian cutoff
+merged_replicates.df <- merged_replicates.df %>%
+  mutate(Point_Label = case_when(
+    median_pvals < p & Microarray_FC >= e ~ "Up",
+    median_pvals < p & Microarray_FC <= -e ~ "Down",
+    median_pvals < 0.001 & between(Microarray_FC, -e, e) ~ "Chrom",
+    TRUE ~ "Other"
+  ))
+  # mutate(Point_Label = case_when(
+  #   sp::point.in.polygon(Microarray_FC, -log10(median_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC >= e ~ "Up",
+  #   sp::point.in.polygon(Microarray_FC, -log10(median_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC <= -e ~ "Down",
+  #   sp::point.in.polygon(Microarray_FC, -log10(median_pvals), curve_data$x, curve_data$y) == 0 & between(Microarray_FC, -e, e) ~ "Chrom",
+  #   TRUE ~ "Other"
+  # ))
+
+# Store y limit
+y_end <- 15
+
+# Calculate coordinates to fill the up, down, and chrom regions based on the cutoff
+down_poly <- rbind(c(-4, y_end), subset(curve_data, x >= -4 & x <= -e), c(-e, y_end))
+chrom_poly <- rbind(c(-e, y_end), subset(curve_data, x >= -e & x <= e), c(e, y_end))
+up_poly <- rbind(c(e, y_end), subset(curve_data, x >= e & x <= 4), c(4, y_end))
+
+js_volcanoes <- list()
+for (mut in selected_muts) {
+   js_volcanoes[[mut]] <- ggplot(subset(merged_replicates.df, Orig_Mutant == mut), aes(x = Microarray_FC, y = -log10(median_pvals), color = Point_Label)) +
+    geom_point() +
+    geom_vline(aes(xintercept = -0.5), lty = 2, lwd = 0.2) +
+    geom_vline(aes(xintercept = 0.5), lty = 2, lwd = 0.2) +
+    scale_color_manual(breaks = c("Up", "Down", "Chrom", "Other"), values = c("#bf212f", "#264b96", "#006f3c", "grey80"), labels = c("Upregulated + Chrom", "Downregulated + Chrom", "Chrom", "Other")) +
+    theme_bw() +
+    # geom_label_repel(data = subset(merged_replicates.df, Orig_Mutant == mut & Locus %in% selected_loci & Point_Label %in% c("Up", "Down")), aes(x = Microarray_FC, y = -log10(median_pvals), label = Locus), label.padding = 0.1, show.legend = F, label.size = NA, fill = NA, max.overlaps = Inf, force = 4, size = 3, ylim = c(5, NA), segment.size = 0.1, fontface = "italic") +
+     geom_label_repel(data = subset(merged_replicates.df, Orig_Mutant == mut & Locus %in% selected_loci & Point_Label %in% c("Up", "Down")), aes(x = Microarray_FC, y = -log10(median_pvals), label = Locus), label.padding = 0.1, show.legend = F, label.size = NA, fill = NA, max.overlaps = 10, force = 4, size = 3, segment.size = 0.1, ylim = c(5, NA), fontface = "italic", direction = "both", min.segment.length = 1) +
+    theme(legend.position = "none", 
+          panel.grid = element_blank(),
+          plot.title = element_text(hjust = 0.5, face = "italic"), 
+          axis.text = element_text(size = 10)) +
+     labs(y = expression(Chromatin~-log[10]~(p)), x = expression(Expression~log[2]~(FC)), title = paste0(tolower(mut), "\u0394"), color = "") + 
+    coord_cartesian(xlim = c(-4, 4), ylim = c(0, y_end), expand = c(0,0)) + 
+    geom_polygon(data = down_poly, aes(x, y), fill = "#264b96", alpha = 0.1, color = NA, inherit.aes = F) +  
+    geom_polygon(data = up_poly, aes(x, y), fill = "#bf212f", alpha = 0.1, color = NA, inherit.aes = F) +  
+    geom_polygon(data = chrom_poly, aes(x, y), fill = "#006f3c", alpha = 0.1, color = NA, inherit.aes = F) +  
+    geom_polygon(data = curve_data, aes(x, y), fill = "grey80", alpha = 0.1, color = NA, inherit.aes = F) +  
+    geom_line(data = curve_data, aes(x = x, y = y), inherit.aes = F, linetype = "dashed", linewidth = 0.2) 
+}
+
+patch <- wrap_plots(js_volcanoes)
+ggsave(patch, filename = "/Users/kmoyung/Desktop/replicate_volcano.png", dpi = 800, width = 10, height = 8)
+
+```
+
+
+## Plot correlation comparing original mutants vs. merged
+
+```{r}
+corr_plots <- list()
+for (mut in muts_list) {
+  # Plot nucleosome occupancy changes
+  sub_orig <- old_master.df %>%
+    filter(Mutant == mut) %>%  # Select relevant mutant
+    arrange(-WindowJS) %>%  # Order by lowest lnorm_pvals
+    # slice_head(n = 1000) %>%  # Select top 500
+    dplyr::select(Mutant, Locus, Subnuc_Norm, Nuc_Norm, Mut_Nucs, Mut_Subnucs, Total_Mut_Nucs) %>%
+    rename(
+      Old_Subnuc_Norm = Subnuc_Norm,
+      Old_Nuc_Norm = Nuc_Norm,
+      Old_Mut_Nucs = Mut_Nucs,
+      Old_Mut_Subnucs = Mut_Subnucs, 
+      Old_Total_Mut_Nucs = Total_Mut_Nucs
+    )
+  
+  sub_rep <- master.df %>%
+    filter(Mutant == mut) %>%  # Select relevant mutant
+    arrange(-WindowJS) %>%  # Order by lowest lnorm_pvals
+    # slice_head(n = 1000) %>%  # Select top 500
+    dplyr::select(Mutant, Locus, Subnuc_Norm, Nuc_Norm, Mut_Nucs, Mut_Subnucs, Total_Mut_Nucs)
+  
+  merged.df <- left_join(sub_rep, sub_orig, by = c("Mutant", "Locus"))
+  
+  corr_plots[[mut]] <- ggplot(merged.df, aes(x = Old_Nuc_Norm, y = Nuc_Norm)) + 
+    geom_point() + 
+    stat_cor(aes(label = ..r.label..)) + 
+    theme_minimal() + 
+    theme(plot.title = element_text(hjust = 0.5, face = "bold.italic")) + 
+    labs(x = "Original", y = "Merged", title = paste0(tolower(mut), "\u0394"))
+  
+}
+
+patch <- wrap_plots(corr_plots, ncol = 4)
+patch
+
+# ggsave(patch, filename = "/Users/kmoyung/Desktop/replicate_correlations.png", dpi = 800, width = 9, height = 10)
+```
+## Compare with individual replicates
+
+```{r}
+
+sub1.df <- subset(single_rep_master.df, Mutant == "GAL80")[, c("Mutant", "Locus", "Subnuc_Norm")]
+colnames(sub1.df) <- c("Mutant", "Locus", "GAL80_Nucs")
+
+sub2.df <- subset(single_rep_master.df, Mutant == "GAL80_Rep2")[, c("Mutant", "Locus", "Mut_Subnucs")]
+colnames(sub2.df) <- c("Mutant", "Locus", "Rep1_Nucs")
+
+merge.df <- inner_join(sub1.df, sub2.df, by = c("Locus"))
+
+ggplot(merge.df, aes(x = GAL80_Nucs, y = Rep1_Nucs)) + 
+  geom_pointdensity() + 
+  stat_cor()
+```
+
+```{r}
+check.df <- left_join(merge.df, gene.df, by = c("Locus" = "alias"))
+```
+
+Identify dropout genes
+
+```{r}
+mut <- "GAL80"
+
+# Plot nucleosome occupancy changes
+sub_orig <- old_master.df %>%
+  filter(Mutant == mut) %>%  # Select relevant mutant
+  arrange(-WindowJS) %>%  # Order by lowest lnorm_pvals
+  # slice_head(n = 1000) %>%  # Select top 500
+  dplyr::select(Mutant, Locus, Subnuc_Norm, Nuc_Norm, Mut_Nucs, Mut_Subnucs, gamma_pvals, Term_Mut_Nucs) %>%
+  rename(
+    Old_Subnuc_Norm = Subnuc_Norm,
+    Old_Nuc_Norm = Nuc_Norm,
+    Old_Mut_Nucs = Mut_Nucs,
+    Old_Mut_Subnucs = Mut_Subnucs, 
+    Old_Pvals = gamma_pvals, 
+    Old_Term_Mut_Nucs = Term_Mut_Nucs
+  )
+
+sub_rep <- master.df %>%
+  filter(Mutant == mut) %>%  # Select relevant mutant
+  arrange(-WindowJS) %>%  # Order by lowest lnorm_pvals
+  # slice_head(n = 1000) %>%  # Select top 500
+  dplyr::select(Mutant, Locus, Subnuc_Norm, Nuc_Norm, Mut_Nucs, Mut_Subnucs, gamma_pvals, Term_Mut_Nucs)
+
+merged.df <- left_join(sub_rep, sub_orig, by = c("Mutant", "Locus"))
+
+ggplot(merged.df, aes(x = Old_Mut_Nucs, y = Mut_Nucs)) + 
+  geom_point() + 
+  stat_cor(aes(label = ..r.label..)) + 
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold.italic")) + 
+  labs(x = "Original", y = "Merged", title = paste0(tolower(mut), "\u0394"))
+
+# Merge with chrXII
+# check.df <- left_join(merged.df, gene.df[, c("chrom", "alias")], by = c("Locus" = "alias"))
+# 
+# ggplot(check.df, aes(x = Old_Mut_Nucs, y = Mut_Nucs)) + 
+#   geom_point() + 
+#   geom_label(data = subset(check.df, Locus %in% c("GAL1", "GAL10")), aes(label = Locus)) + 
+#   stat_cor(aes(label = ..r.label..)) + 
+#   theme_minimal() + 
+#   theme(plot.title = element_text(hjust = 0.5, face = "bold.italic")) + 
+#   labs(x = "Original", y = "Merged", title = paste0(tolower(mut), "\u0394"))
+# 
+remove_genes <- check.df %>%
+  mutate(diff = Old_Mut_Nucs - Mut_Nucs) %>%
+  filter(diff > 500)
+  # filter(Mut_Nucs > 250)
+remove_genes <- remove_genes$Locus
+```
+
+```{r}
+mut <- "CBF1"
+
+# Plot nucleosome occupancy changes
+sub_orig <- old_master.df %>%
+  filter(Mutant == mut) %>%  # Select relevant mutant
+  arrange(-WindowJS) %>%  # Order by lowest lnorm_pvals
+  # slice_head(n = 1000) %>%  # Select top 500
+  dplyr::select(Mutant, Locus, Subnuc_Norm, Nuc_Norm, Mut_Nucs, Mut_Subnucs, gamma_pvals, Term_Mut_Nucs) %>%
+  rename(
+    Old_Subnuc_Norm = Subnuc_Norm,
+    Old_Nuc_Norm = Nuc_Norm,
+    Old_Mut_Nucs = Mut_Nucs,
+    Old_Mut_Subnucs = Mut_Subnucs, 
+    Old_Pvals = gamma_pvals, 
+    Old_Term_Mut_Nucs = Term_Mut_Nucs
+  )
+
+sub_rep <- master.df %>%
+  filter(Mutant == mut) %>%  # Select relevant mutant
+  arrange(-WindowJS) %>%  # Order by lowest lnorm_pvals
+  # slice_head(n = 1000) %>%  # Select top 500
+  dplyr::select(Mutant, Locus, Subnuc_Norm, Nuc_Norm, Mut_Nucs, Mut_Subnucs, gamma_pvals, Term_Mut_Nucs)
+
+merged.df <- left_join(sub_rep, sub_orig, by = c("Mutant", "Locus"))
+
+ggplot(merged.df, aes(x = Old_Mut_Nucs, y = Mut_Nucs)) + 
+  geom_point() + 
+  stat_cor(aes(label = ..r.label..)) + 
+  theme_minimal() + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold.italic")) + 
+  labs(x = "Original", y = "Merged", title = paste0(tolower(mut), "\u0394"))
+
+# Merge with chrXII
+check.df <- left_join(merged.df, gene.df[, c("chrom", "alias")], by = c("Locus" = "alias"))
+
+ggplot(check.df, aes(x = Old_Mut_Nucs, y = Mut_Nucs)) +
+  geom_point() +
+  geom_label(data = subset(check.df, Locus %in% c("GAL1", "GAL10")), aes(label = Locus)) +
+  stat_cor(aes(label = ..r.label..)) +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold.italic")) +
+  labs(x = "Original", y = "Merged", title = paste0(tolower(mut), "\u0394"))
+
+remove_genes2 <- check.df %>%
+  mutate(diff = Old_Mut_Nucs - Mut_Nucs) %>%
+  filter(diff > 500)
+  # filter(Mut_Nucs > 250)
+remove_genes2 <- remove_genes2$Locus
+
+dropouts <- intersect(remove_genes, remove_genes2)
+```
+
+## Plot correlation comparing original mutants vs. merged removing dropout genes
+
+Compare rep1 with rep2
+
+```{r}
+reps_corr_plots <- list()
+for (i in 1:length(muts_list)) {
+  mut <- muts_list[i]
+  
+  rep1.df <- readRDS(paste0("/Users/kmoyung/mutant_diffs_replicates/", mut, "_Rep1_quantifications_length_corrected.RDS"))
+  rep1.df <- rep1.df[rep1.df$Locus %in% filtered_genes$x, ]
+  rep1.df$Mutant <- mut
+  
+  rep1.df <- rep1.df %>%
+    dplyr::select(Mutant, Locus, Mut_Nucs) %>%
+    rename(Old_Mut_Nucs = Mut_Nucs)
+  
+  rep2.df <- readRDS(paste0("/Users/kmoyung/mutant_diffs_replicates/", mut, "_Rep2_quantifications_length_corrected.RDS"))
+  rep2.df <- rep2.df[rep2.df$Locus %in% filtered_genes$x, ]
+  rep2.df$Mutant <- mut
+  
+  rep2.df <- rep2.df %>%
+    dplyr::select(Mutant, Locus, Mut_Nucs)
+  
+  reps_merged.df <- left_join(rep1.df, rep2.df)
+  
+  reps_corr_plots[[mut]] <- ggplot(subset(reps_merged.df, !(Locus %in% dropouts) & Mut_Nucs != 0), aes(x = Old_Mut_Nucs, y = Mut_Nucs)) + 
+    geom_pointdensity(adjust = 20) + 
+    scale_color_viridis() + 
+    stat_cor(aes(label = ..r.label..), size = 3) + 
+    theme_minimal() + 
+    theme(plot.title = element_text(hjust = 0.5, face = "bold.italic"), 
+          legend.position = "none") + 
+    labs(x = "Replicate 1", y = "Replicate 2", title = paste0(tolower(mut), "\u0394"))
+}
+
+patch <- wrap_plots(reps_corr_plots, ncol = 4)
+patch
+
+ggsave(patch, filename = "/Users/kmoyung/Desktop/repvsrep_correlations_filtered.png", dpi = 800, width = 9, height = 10)
+```
+
+Compare each rep with original
+
+```{r}
+rep1_corr_plots <- list()
+rep2_corr_plots <- list()
+for (i in 1:length(muts_list)) {
+  mut <- muts_list[i]
+  
+  rep1.df <- readRDS(paste0("/Users/kmoyung/mutant_diffs_replicates/", mut, "_Rep1_quantifications_length_corrected.RDS"))
+  rep1.df <- rep1.df[rep1.df$Locus %in% filtered_genes$x, ]
+  rep1.df$Mutant <- mut
+  
+  rep2.df <- readRDS(paste0("/Users/kmoyung/mutant_diffs_replicates/", mut, "_Rep2_quantifications_length_corrected.RDS"))
+  rep2.df <- rep2.df[rep2.df$Locus %in% filtered_genes$x, ]
+  rep2.df$Mutant <- mut
+  
+  # Plot nucleosome occupancy changes
+  sub_orig <- old_master.df %>%
+    filter(Mutant == mut) %>%  # Select relevant mutant
+    arrange(-WindowJS) %>%  # Order by lowest lnorm_pvals
+    # slice_head(n = 1000) %>%  # Select top 500
+    dplyr::select(Mutant, Locus, Subnuc_Norm, Nuc_Norm, Mut_Nucs, Mut_Subnucs, Total_Mut_Nucs) %>%
+    rename(
+      Old_Subnuc_Norm = Subnuc_Norm,
+      Old_Nuc_Norm = Nuc_Norm,
+      Old_Mut_Nucs = Mut_Nucs,
+      Old_Mut_Subnucs = Mut_Subnucs, 
+      Old_Total_Mut_Nucs = Total_Mut_Nucs
+    )
+  
+  # Plot rep1 vs. original
+  rep1_merged.df <- left_join(sub_orig, rep1.df, by = c("Mutant", "Locus"))
+  
+  rep1_corr_plots[[mut]] <- ggplot(subset(rep1_merged.df, !(Locus %in% dropouts) & Mut_Nucs != 0), aes(x = Old_Mut_Nucs, y = Mut_Nucs)) + 
+    geom_pointdensity(adjust = 20) + 
+    scale_color_viridis() + 
+    stat_cor(aes(label = ..r.label..), size = 3) + 
+    theme_minimal() + 
+    theme(plot.title = element_text(hjust = 0.5, face = "bold.italic"), 
+          legend.position = "none") + 
+    labs(x = "Original", y = "Replicate 1", title = paste0(tolower(mut), "\u0394"))
+  
+  # Plot rep2 vs. original
+  rep2_merged.df <- left_join(sub_orig, rep2.df, by = c("Mutant", "Locus"))
+  
+  rep2_corr_plots[[mut]] <- ggplot(subset(rep2_merged.df, !(Locus %in% dropouts) & Mut_Nucs != 0), aes(x = Old_Mut_Nucs, y = Mut_Nucs)) + 
+    geom_pointdensity(adjust = 20) + 
+    scale_color_viridis() + 
+    stat_cor(aes(label = ..r.label..), size = 3) + 
+    theme_minimal() + 
+    theme(plot.title = element_text(hjust = 0.5, face = "bold.italic"), 
+          legend.position = "none") + 
+    labs(x = "Original", y = "Replicate 2", title = paste0(tolower(mut), "\u0394"))
+}
+
+rep1_patch <- wrap_plots(rep1_corr_plots, ncol = 4)
+rep1_patch
+
+ggsave(rep1_patch, filename = "/Users/kmoyung/Desktop/replicate_1_correlations_filtered.png", dpi = 800, width = 9, height = 10)
+
+rep2_patch <- wrap_plots(rep2_corr_plots, ncol = 4)
+rep2_patch
+
+ggsave(rep2_patch, filename = "/Users/kmoyung/Desktop/replicate_2_correlations_filtered.png", dpi = 800, width = 9, height = 10)
+```
+
+
+Merge just the two replicates and compare reps vs. original
+
+```{r}
+for (i in 1:length(muts_list)) {
+  mut <- muts_list[i]
+  
+  rep1.df <- readRDS(paste0("/Users/kmoyung/mutant_diffs_replicates/", mut, "_Rep1_quantifications_length_corrected.RDS"))
+  rep1.df <- rep1.df[rep1.df$Locus %in% filtered_genes$x, ]
+  rep1.df$Mutant <- mut
+  
+  rep2.df <- readRDS(paste0("/Users/kmoyung/mutant_diffs_replicates/", mut, "_Rep2_quantifications_length_corrected.RDS"))
+  rep2.df <- rep2.df[rep2.df$Locus %in% filtered_genes$x, ]
+  rep2.df$Mutant <- mut
+  
+  merge_reps.df <-  data.frame(Mutant = mut, 
+                               Locus = rep1.df$Locus, 
+                               Mut_Nucs = trunc((rep1.df$Mut_Nucs + rep2.df$Mut_Nucs) / 2), 
+                               Mut_Subnucs = trunc((rep1.df$Mut_Subnucs + rep2.df$Mut_Subnucs) / 2))
+  
+  if (i == 1) {
+    master_merge_reps.df <- merge_reps.df
+  } else {
+    master_merge_reps.df <- bind_rows(master_merge_reps.df, merge_reps.df)
+  }
+}
+
+corr_plots <- list()
+for (mut in muts_list) {
+  # Plot nucleosome occupancy changes
+  sub_orig <- old_master.df %>%
+    filter(Mutant == mut) %>%  # Select relevant mutant
+    arrange(-WindowJS) %>%  # Order by lowest lnorm_pvals
+    # slice_head(n = 1000) %>%  # Select top 500
+    dplyr::select(Mutant, Locus, Subnuc_Norm, Nuc_Norm, Mut_Nucs, Mut_Subnucs, Total_Mut_Nucs) %>%
+    rename(
+      Old_Subnuc_Norm = Subnuc_Norm,
+      Old_Nuc_Norm = Nuc_Norm,
+      Old_Mut_Nucs = Mut_Nucs,
+      Old_Mut_Subnucs = Mut_Subnucs, 
+      Old_Total_Mut_Nucs = Total_Mut_Nucs
+    )
+  
+  sub_rep <- master_merge_reps.df %>%
+    filter(Mutant == mut)
+  
+  merged.df <- left_join(sub_orig, sub_rep, by = c("Mutant", "Locus"))
+  
+  corr_plots[[mut]] <- ggplot(subset(merged.df, !(Locus %in% dropouts) & Mut_Nucs != 0), aes(x = Old_Mut_Nucs, y = Mut_Nucs)) + 
+    geom_pointdensity(adjust = 20, size = 0.5) + 
+    scale_color_viridis(direction = -1, option = "mako") + 
+    stat_cor(aes(label = ..r.label..), size = 3) + 
+    theme_minimal() + 
+    theme(plot.title = element_text(hjust = 0.5, face = "bold.italic"), 
+          legend.position = "none") + 
+    labs(x = "Original", y = "Merged", title = paste0(tolower(mut), "\u0394"))
+  
+}
+
+patch <- wrap_plots(corr_plots, ncol = 4)
+patch
+
+ggsave(patch, filename = "/Users/kmoyung/Desktop/new_replicate_correlations_filtered.png", dpi = 800, width = 9, height = 10)
+```
+
+
+Plot correlation between rep+original merged vs. original
+
+```{r}
+corr_plots <- list()
+for (mut in muts_list) {
+  # Plot nucleosome occupancy changes
+  sub_orig <- old_master.df %>%
+    filter(Mutant == mut) %>%  # Select relevant mutant
+    arrange(-WindowJS) %>%  # Order by lowest lnorm_pvals
+    # slice_head(n = 1000) %>%  # Select top 500
+    dplyr::select(Mutant, Locus, Subnuc_Norm, Nuc_Norm, Mut_Nucs, Mut_Subnucs, Total_Mut_Nucs) %>%
+    rename(
+      Old_Subnuc_Norm = Subnuc_Norm,
+      Old_Nuc_Norm = Nuc_Norm,
+      Old_Mut_Nucs = Mut_Nucs,
+      Old_Mut_Subnucs = Mut_Subnucs, 
+      Old_Total_Mut_Nucs = Total_Mut_Nucs
+    )
+  
+  sub_rep <- master.df %>%
+    filter(Mutant == mut) %>%  # Select relevant mutant
+    arrange(-WindowJS) %>%  # Order by lowest lnorm_pvals
+    # slice_head(n = 1000) %>%  # Select top 500
+    dplyr::select(Mutant, Locus, Subnuc_Norm, Nuc_Norm, Mut_Nucs, Mut_Subnucs, Total_Mut_Nucs)
+  
+  merged.df <- left_join(sub_rep, sub_orig, by = c("Mutant", "Locus"))
+  
+  corr_plots[[mut]] <- ggplot(subset(merged.df, !(Locus %in% dropouts)), aes(x = Old_Mut_Nucs, y = Mut_Nucs)) + 
+    geom_pointdensity(adjust = 20) + 
+    scale_color_viridis() + 
+    stat_cor(aes(label = ..r.label..), size = 3) + 
+    theme_minimal() + 
+    theme(plot.title = element_text(hjust = 0.5, face = "bold.italic"), 
+          legend.position = "none") + 
+    labs(x = "Original", y = "Merged", title = paste0(tolower(mut), "\u0394"))
+  
+}
+
+patch <- wrap_plots(corr_plots, ncol = 4)
+patch
+
+ggsave(patch, filename = "/Users/kmoyung/Desktop/replicate_correlations_filtered.png", dpi = 800, width = 9, height = 10)
+```

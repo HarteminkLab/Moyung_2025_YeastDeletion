@@ -1,0 +1,346 @@
+---
+title: "Plot Multiple Typhoon Plots in a Single Loci"
+output: html_notebook
+---
+
+```{r setup, include=T} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
+
+```{r}
+# Source the base code and functions
+if (Sys.info()[['sysname']] == "Windows") {
+  source("C:/Users/Kevin/Desktop/MacAlpine_KM/Code/get_midpoints.R")
+  gene.df = read.csv("D:/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv",header = T)
+} else {
+  gene.df = read.csv("/Users/kmoyung/MacAlpine_KM/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv", header = T)
+  source("/Users/kmoyung/MacAlpine_KM/Code/get_midpoints.R")
+  source("/Users/kmoyung/MacAlpine_KM/Code/sample_by_fragment_length.R")
+}
+```
+
+Override existing functions
+
+```{r}
+library(gggenes)
+# Plot genes using the gggenes package
+plot_genes <- function(locus, start, end) {
+  geneplot <- ggplot(subset(gene.df, alias %in% locus),
+                       aes(xmin = left_coord, xmax = right_coord, y = 1, forward = ifelse(strand == "+", 1, 0), label = locus)) +
+      geom_gene_arrow(fill = "grey90", arrow_body_height = grid::unit(6, "mm"), 
+                      arrowhead_height = unit(6, "mm"), 
+                      arrowhead_width = unit(1, "mm")) +
+      geom_feature(aes(x = ifelse(strand == "+", left_coord, right_coord), forward = ifelse(strand == "+", 1, 0), y = 1), 
+                   feature_height = unit(6, "mm")) + 
+      geom_gene_label(align = ifelse(strand == "+", "left", "right"), fontface = "bold.italic") +
+      theme_void() +
+      coord_cartesian(xlim = c(start, end), clip = "on", expand = c(0,0))
+  return(geneplot)
+}
+
+## get_samples(mut): Returns a list of dataframes of reads, one df for every chromosome
+get_samples <- function(mut, set_chr, ref_mut) {
+  # Check if we want a specific chr or all the chrs
+  if (set_chr != "all") {
+    cur_chr <- set_chr
+    chr_start <- coordinates[match(cur_chr, coordinates$Chr), "Start"]
+    chr_end <- coordinates[match(cur_chr, coordinates$Chr), "End"]
+    mid.df <- get_midpoint_dataframe(mut, cur_chr, chr_start, chr_end)
+    
+    ## OPTIONAL: Sample the current mutant to the same library size as the ref mutant
+    min_chr_depths <- subset(total_reads.df, Mutant == ref_mut)
+    cur_depth = min_chr_depths[min_chr_depths$Chr == cur_chr, "Count"]
+    mid.df <- sample_n(mid.df, size = cur_depth, replace = T)
+    
+    # Truncate locations with more than n duplicate reads in the sample
+    depth <- mut_reads.df[mut_reads.df$Mutant == mut, "Count"]
+    n_dupes <- ceiling(depth / 4000000)
+    mid.dt <- as.data.table(mid.df)
+    freq_mid.dt <- mid.dt[, .N, by=names(mid.dt)]
+    freq_mid.dt[freq_mid.dt$N > n_dupes, "N"] <- n_dupes
+    filtered_mid.df <- data.frame(freq_mid.dt[rep(seq_len(dim(freq_mid.dt)[1]), freq_mid.dt$N), 1:2, drop = FALSE], row.names=NULL)
+    
+    return(filtered_mid.df)
+  } else {
+    samples <- list()
+    for (cur_chr in chrs) {
+      chr_start <- coordinates[match(cur_chr, coordinates$Chr), "Start"]
+      chr_end <- coordinates[match(cur_chr, coordinates$Chr), "End"]
+      mid.df <- get_midpoint_dataframe(mut, cur_chr, chr_start, chr_end)
+      
+      ## OPTIONAL: Sample the current mutant to the same library size as the ref mutant
+      min_chr_depths <- subset(total_reads.df, Mutant == ref_mut)
+      cur_depth = min_chr_depths[min_chr_depths$Chr == cur_chr, "Count"]
+      mid.df <- sample_n(mid.df, size = cur_depth, replace = T)
+      
+      # Truncate locations with more than n duplicate reads in the sample
+      depth <- mut_reads.df[mut_reads.df$Mutant == mut, "Count"]
+      n_dupes <- ceiling(depth / 4000000)
+      mid.dt <- as.data.table(mid.df)
+      freq_mid.dt <- mid.dt[, .N, by=names(mid.dt)]
+      freq_mid.dt[freq_mid.dt$N > n_dupes, "N"] <- n_dupes
+      filtered_mid.df <- data.frame(freq_mid.dt[rep(seq_len(dim(freq_mid.dt)[1]), freq_mid.dt$N), 1:2, drop = FALSE], row.names=NULL)
+      
+      samples[[cur_chr]] <- filtered_mid.df
+    }
+    return(samples)
+  }
+  
+}
+
+# Plot sample typhoon plot
+plot_sample_typhoon <- function(mut, chr, start, end, ref_mut, prom_start, prom_end) {
+  
+  # Get the control df
+  mid.df <- get_samples(mut, chr, ref_mut)
+  
+  # Get the control df
+  control.df <- get_controls(chr, mut)
+  
+  # Re-sample by fragment length distribution in the control
+  mid.df <- sample_by_fragment_length(mid.df, control.df)
+  
+  # Subset for the locus
+  mid.df <- subset(mid.df, mid >= start & mid <= end)
+  
+  # Calculate smoothed density values
+  mid.df$density <- get_density(mid.df$mid, mid.df$length, 
+                                         n = 200, 
+                                         h = c(25, 30))
+  
+  # Calculate color scale limit based on window length
+  color_lim <- c(0, 0.08 / (end - start))
+  
+  plot_sample <- ggplot(mid.df[order(mid.df$density), ]) + 
+    # annotate("rect", xmin = prom_start, xmax = prom_end, ymin = 0, ymax = 250, fill = "#8073AC", alpha = 0.2) + 
+    # geom_rect(xmin = prom_start, xmax = prom_end, ymin = 0, ymax = 250, fill = "#8073AC", alpha = 0.2) + 
+    # geom_point(aes(x = mid, y = length), size = 0.45, shape = 20, fill = "gray") +
+    geom_point(aes(x = mid, y = length, color = density), size = 0.45, shape = 20) +
+    # scale_color_gradientn(colors = rev(magma(6)[-1]), limits = c(0, 0.00003), oob = scales::squish) + 
+    scale_color_gradientn(colors = rev(magma(6)[-1]), limits = color_lim, oob = scales::squish) + 
+    ggtitle(paste0(tolower(mut), "\u0394")) +
+    theme_bw() +
+    theme(panel.grid = element_blank(), 
+          legend.position = "none", 
+          plot.title = element_text(face = "italic", hjust = 0.5), 
+          axis.title.y = element_blank(), 
+          axis.text.x = element_blank(), 
+          axis.ticks.x = element_blank()) + 
+    labs(y = "Length", x = paste0(chr, ":", start, "-", end), color = "Density") +
+    coord_cartesian(xlim = c(start, end), expand = c(0, 0))
+  
+  return(plot_sample)
+}
+
+# Plot control typhoon plot
+plot_control_typhoon <- function(chr, start, end, mut, prom_start, prom_end) {
+  # Get the control df
+  control.df <- get_controls(chr, mut)
+  
+  # Subset for the locus
+  control.df <- subset(control.df, mid >= start & mid <= end)
+  
+  # Calculate smoothed density values
+  control.df$density <- get_density(control.df$mid, control.df$length,
+                                    n = 200,
+                                    h = c(25, 30))
+  
+  # Calculate color scale limit based on window length
+  color_lim <- c(0, 0.08 / (end - start))
+  
+  plot_control <- ggplot(control.df[order(control.df$density), ]) +
+    # annotate("rect", xmin = prom_start, xmax = prom_end, ymin = 0, ymax = 250, fill = "#8073AC", alpha = 0.2) + 
+    # geom_rect(xmin = prom_start, xmax = prom_end, ymin = 0, ymax = 250, fill = "#8073AC", alpha = 0.2) + 
+    # geom_point(aes(x = mid, y = length), size = 0.45, shape = 20, fill = "gray") +
+    geom_point(aes(x = mid, y = length, color = density), size = 0.45, shape = 20) +
+    # scale_color_gradientn(colors = rev(magma(6)[-1]), limits = c(0, 0.00003), oob = scales::squish) + 
+    scale_color_gradientn(colors = rev(magma(6)[-1]), limits = color_lim, oob = scales::squish) + 
+    ggtitle(paste0("Control")) +
+    theme_bw() +
+    theme(panel.grid = element_blank(), 
+          legend.position = "none", 
+          plot.title = element_text(hjust = 0.5), 
+          axis.title.y = element_blank(), 
+          axis.text.x = element_blank(), 
+          axis.ticks.x = element_blank()) +
+    labs(y = "Length", x = chr, color = "Density") +
+    coord_cartesian(xlim = c(start, end), expand = c(0, 0))
+  
+  return(plot_control)
+}
+
+
+# Plot motif locations
+# muts: list of mutant tfs
+# locus: location to narrow down on
+plot_motif <- function(muts, locus, start, end) {
+  sub_motifs.df <- subset(all_fimo.df, motif_id %in% muts & Gene == locus)
+  sub_rossi.df <- subset(rossi.df, toupper(name) %in% muts & Target == locus)
+  sub_macisaac.df <- subset(macisaac.df, toupper(alias) %in% muts & Target == locus)
+  
+  return(ggplot(sub_rossi.df, aes(x = midpoint, y = 1, fill = name)) + 
+    geom_point(shape = 25, color = "black", size = 5, alpha = 0.6) + 
+    theme_void() + 
+    theme(legend.position = "none") + 
+    coord_cartesian(xlim = c(start, end), expand = c(0, 0)))
+}
+```
+
+
+## Gal induction samples
+
+```{r}
+mutants <- rbind(mutants, c("Gal_Ind_1", 1292), c("Gal_Ind_2", 1298))
+mutants$V2 <- as.numeric(mutants$V2)
+```
+
+
+Plot 4 mutants with control at a single loci
+
+```{r}
+muts <- c("HAP5", "HAP3", "CBF1")
+locus <- "QCR10"
+# muts <- c("CBF1", "BAS1", "MBP1")
+# locus <- "MET10"
+# muts <- c("MIG2", "PAF1", "ROX1", "SPP1", "YTA7", "SPT4")
+# locus <- "SER3"
+# muts <- c("ROX1", "SUB1", "OAF1")
+# locus <- "ANB1"
+# muts <- c("YTA7", "SPT3")
+# locus <- "MRS4"
+# muts <- c("ARG80", "ARG81", "MBP1")
+# locus <- c("ARG8")
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+offset <- 500
+
+if (strand == "+") {
+  start <- coords$tss[1] - 300 - offset
+  end <- coords$tss[1] + 750 + offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1] + 500
+} else {
+  start <- coords$tss[1] - 750 - offset
+  end <- coords$tss[1] + 300 + offset
+  prom_start <- coords$tss[1] - 500
+  prom_end <- coords$tss[1] + 250
+}
+
+# Add "plot" for global y-axis
+yaxis <- ggplot(data.frame(l = "Fragment Length", x = 1, y = 1)) +
+      geom_text(aes(x, y, label = l), angle = 90, size = 5) + 
+      theme_void() +
+      coord_cartesian(clip = "off")
+
+geneplot <- plot_genes(locus, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, muts[1], prom_start, prom_end) + theme(axis.title.x = element_blank())
+sampleplot1 <- plot_sample_typhoon(muts[1], chr, start, end, muts[1], prom_start, prom_end) +
+  theme(axis.title.x = element_blank())
+  annotate("rect", xmin = prom_start, xmax = prom_end, ymin = 0, ymax = 250, fill = "#8073AC", alpha = 0.3)
+sampleplot2 <- plot_sample_typhoon(muts[2], chr, start, end, muts[1], prom_start, prom_end) +
+  theme(axis.title.x = element_blank())
+  annotate("rect", xmin = prom_start, xmax = prom_end, ymin = 0, ymax = 250, fill = "#8073AC", alpha = 0.3)
+sampleplot3 <- plot_sample_typhoon(muts[3], chr, start, end, muts[1], prom_start, prom_end)
+
+## For the pioneer factor plot ONLY
+# controlplot <- plot_control_typhoon(chr, start, end, muts[1], prom_start, prom_end) + theme(axis.title.x = element_blank()) + 
+#   annotate("rect", xmin = coords$tss[1] - 250, xmax = coords$tss[1], ymin = 0, ymax = 250, fill = "grey", alpha = 0.3)
+# sampleplot1 <- plot_sample_typhoon(muts[1], chr, start, end, muts[1], prom_start, prom_end) + 
+#   theme(axis.title.x = element_blank()) + 
+#   annotate("rect", xmin = coords$tss[1] - 250, xmax = coords$tss[1], ymin = 0, ymax = 250, fill = "grey", alpha = 0.3)
+# sampleplot2 <- plot_sample_typhoon(muts[2], chr, start, end, muts[1], prom_start, prom_end) + 
+#   theme(axis.title.x = element_blank()) +
+#   annotate("rect", xmin = coords$tss[1] - 250, xmax = coords$tss[1], ymin = 0, ymax = 250, fill = "grey", alpha = 0.3)
+# sampleplot3 <- plot_sample_typhoon(muts[3], chr, start, end, muts[1], prom_start, prom_end) + 
+#   annotate("rect", xmin = coords$tss[1] - 250, xmax = coords$tss[1], ymin = 0, ymax = 250, fill = "#87AEDF", alpha = 0.3)
+
+patch <- wrap_plots(geneplot, plot_spacer(), controlplot, sampleplot1, sampleplot2, sampleplot3, ncol = 1, nrow = (length(muts) + 3), heights = c(1.5, -0.5, 1, 1, 1, 1)) + plot_layout(guides = "collect", widths = c(0.1, 1))
+# patch <- yaxis + (geneplot / plot_spacer() / controlplot / sampleplot1 / sampleplot2 / sampleplot3) +
+#     plot_layout(guides = "collect", heights = c(3, -1.1, 1.5, 1.5, 1.5, 1.5, 1.5))
+patch
+ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/multi_typhoon_", locus,"_locus_new.png"), width = 4.5, height = (length(muts) * 15 / 6), dpi = 800)
+# ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/multi_typhoon_", locus,"_locus.png"), width = 3.5, height = (length(muts) * 15 / 6), dpi = 800)
+```
+
+## Plot fragment enrichments at this locus
+
+```{r}
+control_subnuc <- readRDS("/Users/kmoyung/global_subnuc_enrichment/Control_global_subnuc_enrichment.RDS")
+control_subnuc <- subset(control_subnuc, Chr == chr & between(Pos, start, end))
+subnuc_enrich <- control_subnuc
+for (mut in muts) {
+  cur_enrich <- readRDS(paste0("/Users/kmoyung/global_subnuc_enrichment/", mut, "_global_subnuc_enrichment.RDS"))
+  cur_enrich <- subset(cur_enrich, Chr == chr & between(Pos, start, end))
+  subnuc_enrich <- rbind(subnuc_enrich, cur_enrich)
+}
+```
+
+Normalize by total count of subnuc reads in this window
+
+```{r}
+norm_subnuc_enrich <- subnuc_enrich %>%
+  group_by(Name) %>% 
+  mutate(Count_Norm = Count / sum(Count))
+```
+
+
+Plot at this locus
+
+```{r}
+ggplot(norm_subnuc_enrich) + 
+  geom_line(aes(x = Pos, y = Count_Norm, color = Name)) + 
+  theme_bw() + 
+  labs(y = "Scaled Counts") + 
+  coord_cartesian(expand = c(0, 0))
+```
+
+## Plot the JS scores at this window
+
+```{r}
+library(plyr)
+js_scores <- get_scores(chr)
+js_steps <- get_steps(chr)
+```
+
+```{r}
+left_coord <- match(round_any(start, 50), js_steps)
+right_coord <- match(round_any(end, 50), js_steps)
+```
+
+```{r}
+js.df <- data.frame(js = 0, pos = 0, mutant = "")
+
+for (mut in muts) {
+  cur_scores <- js_scores[left_coord:right_coord, mut]
+  cur.df <- data.frame(js = cur_scores, pos = seq(left_coord, right_coord, 1), mutant = mut)
+  js.df <- rbind(js.df, cur.df)
+}
+js.df <- js.df[-1, ]
+```
+
+```{r}
+plots <- list()
+for (mut in muts) {
+  plots[[mut]] <- ggplot(subset(js.df, mutant == mut), aes(x = pos, y = js)) + 
+  geom_line() + 
+  labs(x = "Position", y = "JS Divergence", title = paste0(tolower(mut),"\u0394")) + 
+  theme_bw() + 
+  theme(panel.grid = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.ticks = element_blank(), 
+        plot.title = element_text(face = "italic")) + 
+  coord_cartesian(expand = c(0,0), ylim = c(0, 0.4))
+}
+```
+
+```{r}
+patch <- plots[["CBF1"]] / plots[["BAS1"]] / plots[["MBP1"]]
+patch
+ggsave(patch, filename = "/Users/kmoyung/Desktop/js_plots.png", width = 8, height = 5, dpi = 800)
+```
+

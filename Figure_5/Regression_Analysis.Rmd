@@ -1,0 +1,965 @@
+---
+title: "Linear Regression Analysis of Chromatin Features and Expression"
+output: html_notebook
+---
+
+## Load packages
+
+```{r}
+library(caret)
+library(e1071)
+library(rpart)
+library(stringr)
+```
+
+
+## Load the master dataframe
+
+```{r}
+# master.df <- readRDS("/Users/kmoyung/Desktop/master_diff.RDS")
+master.df <- readRDS("/Users/kmoyung/Desktop/master_diff_length_corrected.RDS")
+```
+
+## Add transcription rate (NET-seq)
+
+```{r}
+netseq.df <- read.csv("/Users/kmoyung/Downloads/gene_net_seq.csv")
+
+# Map ORF name to gene alias
+netseq.df$Locus <- gene.df[match(netseq.df$gene, gene.df$name), "alias"]
+```
+
+# Analysis of different subsets of chromatin changes and linear regression
+
+## Plot subnuc/nuc occupancy changes with expression change and plot linear regression results
+
+```{r}
+library(ggpubr)
+
+# Color scale (low and high)
+# colscale <- c("#0091ff", "#f0650e")
+colscale <- c("#264b96", "#bf212f")
+# colscale <- c("white", )
+
+
+# P-value threshold
+# p <- 0.0001
+p <- 0.005
+# p <- 0.0005
+# Expression threshold
+e <- 0.5
+# e <- 0.75
+# e <- 1
+# Significance threshold
+e_p <- 0.05
+
+# Label points based on the laplacian cutoff
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC >= e ~ "Up + Chrom",
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC <= -e ~ "Down + Chrom", 
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & between(Microarray_FC, -e, e) ~ "Chrom", 
+    TRUE ~ "Other"
+  ))
+
+# Filter out mutants with no significant expression+chromatin changes; we call these "unresponsive" mutants
+sub_master.df <- master.df %>%
+  group_by(Mutant) %>%
+  filter(!all(Point_Label %in% c("Other", "Chrom")))
+
+# sets <- c("All Chromatin", "Sig. Chromatin + Expression", "Silent Chromatin")
+# sets <- c("All Chromatin", "Sig. Chromatin + Expression")
+# sets <- c("Sig. Chromatin + Expression")
+sets <- c("All Chromatin")
+
+# Default limits for the scatterplots
+pred_xlims <- c(-3.5, 3.5)
+pred_xpos <- 1
+xlims <- c(-3, 3)
+ylims <- c(-5, 5)
+ypos <- -3.5
+
+plots <- list()
+
+for (set in sets) {
+  if (set == "All Chromatin") {
+    direct_indirect.df <- sub_master.df %>%
+      group_by(Mutant) %>%
+      filter(Point_Label %in% c("Up + Chrom", "Down + Chrom", "Chrom"))
+  } else if (set == "Sig. Chromatin + Expression") {
+    direct_indirect.df <- sub_master.df %>%
+      group_by(Mutant) %>%
+      filter(Point_Label %in% c("Up + Chrom", "Down + Chrom"))
+  } else {
+    direct_indirect.df <- sub_master.df %>%
+      group_by(Mutant) %>%
+      filter(Point_Label == "Chrom")
+    pred_xlims <- c(-1, 1)
+    pred_xpos <- 0.225
+    ylims <- c(-0.6, 0.6)
+    xlims <- c(-2, 2)
+    ypos <- -0.3
+  }
+  
+  # Try filtering to just direct effects (sites with motif, Rossi, or MacIsaac)
+  # direct_indirect.df <- subset(direct_indirect.df, hasMotif == 1 | Rossi_Site == 1 | MacIsaac_Site == 1)
+  
+  # Merge with NET-seq data
+  direct_indirect.df <- merge(direct_indirect.df, netseq.df, by = "Locus")
+  
+  tf_expr <- ggplot(direct_indirect.df, aes(x = TF_Change, y = Microarray_FC, fill = Microarray_FC)) + 
+    geom_hline(yintercept = 0, lty = "dashed") + 
+    geom_vline(xintercept = 0, lty = "dashed") + 
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    coord_cartesian(xlim = xlims, ylim = ylims) +
+    theme_classic() + 
+    theme(plot.title = element_text(size = 12)) + 
+    labs(x = "TF Occupancy \u0394", y = "Expression \u0394", title = "Site-specific TF Occupancy") + 
+    stat_cor(method = "pearson", label.x = 1.2, label.y = ypos, label.sep = "\n", size = 3)
+  
+  subnuc_expr <- ggplot(direct_indirect.df, aes(x = Subnuc_Norm, y = Microarray_FC, fill = Microarray_FC)) + 
+    geom_hline(yintercept = 0, lty = "dashed") + 
+    geom_vline(xintercept = 0, lty = "dashed") + 
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    coord_cartesian(xlim = xlims, ylim = ylims) +
+    theme_classic() + 
+    theme(legend.position = "none", 
+          plot.title = element_text(size = 12)) + 
+    labs(x = "TF Occupancy \u0394", y = "Expression \u0394", title = "Promoter TF Occupancy") + 
+    stat_cor(method = "pearson", label.x = 1.2, label.y = ypos, label.sep = "\n", size = 3)
+    # stat_cor(method = "pearson", label.x.npc = 0.75, label.y.npc = 0.2, label.sep = "\n")
+  
+  nuc_expr <- ggplot(direct_indirect.df, aes(x = Nuc_Norm, y = Microarray_FC, fill = Microarray_FC)) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    coord_cartesian(xlim = xlims, ylim = ylims) +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 12)) +
+    labs(x = "Nuc Occupancy \u0394", y = "Expression \u0394", title = "Nuc Occupancy") +
+    stat_cor(method = "pearson", label.x = 1.2, label.y = ypos, label.sep = "\n", size = 3)
+  
+  promnuc_expr <- ggplot(direct_indirect.df, aes(x = Promnuc_Norm, y = Microarray_FC, fill = Microarray_FC)) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    coord_cartesian(xlim = xlims, ylim = ylims) +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 12)) +
+    labs(x = "Nuc Occupancy \u0394", y = "Expression \u0394", title = "Promoter Nuc Occupancy") +
+    stat_cor(method = "pearson", label.x = 1.2, label.y = ypos, label.sep = "\n", size = 3)
+  
+  netseq_expr <- ggplot(direct_indirect.df, aes(x = NET_seq, y = Microarray_FC, fill = Microarray_FC)) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    coord_cartesian(ylim = ylims) +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 12)) +
+    labs(x = "Transcription Rate", y = "Expression \u0394", title = "Transcription Rate") +
+    stat_cor(method = "pearson", label.x = 3.8, label.y = ypos, label.sep = "\n", size = 3)
+  
+  term_subnuc_expr <- ggplot(direct_indirect.df, aes(x = Term_Subnuc_Norm, y = Microarray_FC, fill = Microarray_FC)) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    coord_cartesian(xlim = xlims, ylim = ylims) +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 12)) +
+    labs(x = "TF Occupancy \u0394", y = "Expression \u0394", title = "PAS TF Occupancy") +
+    stat_cor(method = "pearson", label.x = 1.2, label.y = ypos, label.sep = "\n", size = 3)
+
+  term_nuc_expr <- ggplot(direct_indirect.df, aes(x = Term_Nuc_Norm, y = Microarray_FC, fill = Microarray_FC)) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    coord_cartesian(xlim = xlims, ylim = ylims) +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 12)) +
+    labs(x = "Nuc Occupancy \u0394", y = "Expression \u0394", title = "PAS Nuc Occupancy") +
+    stat_cor(method = "pearson", label.x = 1.2, label.y = ypos, label.sep = "\n", size = 3)
+  
+  entropy_expr <- ggplot(direct_indirect.df, aes(x = Nuc_Entropy_Change, y = Microarray_FC, fill = Microarray_FC)) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    coord_cartesian(xlim = c(-0.05, 0.05), ylim = ylims) +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 12)) +
+    labs(x = "Nuc Disorganization \u0394", y = "Expression \u0394", title = "Nuc Disorganization") +
+    stat_cor(method = "pearson", label.x = 0.015, label.y = ypos, label.sep = "\n", size = 3)
+  
+  ## Fit a simple linear regression model on these to predict gene expression
+  library(glmnet)
+  
+  # Assess different features 
+  add_features <- c("Nuc_Entropy_Change", "Term_Nuc_Norm", "Promnuc_Norm", "NET_seq", "hasMotif", "MacIsaac_Site", "Rossi_Site")
+  cur_formula <- "Microarray_FC ~ Subnuc_Norm + Nuc_Norm"
+  fits <- list()
+  fits[[cur_formula]] <- lm(formula(cur_formula), data = direct_indirect.df)
+  for (feature in add_features) {
+    cur_formula <- paste0(cur_formula, " + ", feature)
+    fits[[cur_formula]] <- lm(formula(cur_formula), data = direct_indirect.df)
+  }
+
+  # Make predictions with each fit and plot
+  pred_plots <- list()
+  for (fit in fits) {
+    fit_name <- gsub("\\s+", " ", paste(as.character(deparse(formula(fit))), collapse = ""))
+
+    direct_indirect.df$Predicted_Microarray <- predict.lm(fit, newdata = direct_indirect.df)
+
+    pred_plots[[fit_name]] <- ggplot(direct_indirect.df, aes(x = Predicted_Microarray, y = Microarray_FC, fill = Microarray_FC)) +
+      geom_abline(intercept = 0, slope = 1, lty = "dashed") +
+      geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+      scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+      coord_cartesian(xlim = pred_xlims, ylim = ylims) +
+      theme_classic() +
+        theme(legend.position = "none",
+              plot.title = element_text(size = 10)) +
+        labs(x = "Predicted Expression \u0394", y = "True Expression \u0394", title = str_wrap(fit_name, 30)) +
+      stat_cor(method = "pearson", label.x = pred_xpos, label.y = ypos, label.sep = "\n", size = 3)
+
+  }
+
+  patch <- wrap_plots(pred_plots, ncol = 3, nrow = 3)
+  ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/", set, "_prediction_various_features.png"), dpi = 800, width = 9, height = 9)
+  
+  final_fit <- lm(Microarray_FC ~ Subnuc_Norm + Nuc_Norm + Nuc_Entropy_Change + Term_Nuc_Norm + Promnuc_Norm + NET_seq, data = direct_indirect.df)
+  
+
+  direct_indirect.df$Predicted_Microarray <- predict.lm(final_fit, newdata = direct_indirect.df)
+  
+  pred_expr <- ggplot(direct_indirect.df, aes(x = Predicted_Microarray, y = Microarray_FC, fill = Microarray_FC)) +
+    geom_abline(intercept = 0, slope = 1, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    coord_cartesian(xlim = pred_xlims, ylim = ylims) +
+    theme_classic() +
+      theme(legend.position = "none",
+            plot.title = element_text(size = 12)) +
+      labs(x = "Predicted Expression \u0394", y = "True Expression \u0394", title = "Model Predictions") +
+    stat_cor(method = "pearson", label.x = pred_xpos, label.y = ypos, label.sep = "\n", size = 3)
+
+  # Generate correlation matrix
+  corr <- round(cor(direct_indirect.df[, c("Subnuc_Norm", "Nuc_Norm", "Nuc_Entropy_Change", "Term_Nuc_Norm", "Promnuc_Norm", "NET_seq", "Microarray_FC")]), 2)
+  corr_heatmap <- ggcorrplot::ggcorrplot(corr, outline.col = "black", lab = T, type = "upper", colors = c("#FFD400", "white", "#8ABC40")) +
+    scale_x_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Nuc_Entropy_Change",  "Promnuc_Norm", "Term_Nuc_Norm", "NET_seq", "Microarray_FC"),
+                     labels = c("Promoter TF", "Nuc", "Nuc Disorg.", "Promoter Nuc", "PAS Nuc", "Txn Rate", "Expression")) +
+    scale_y_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Nuc_Entropy_Change",  "Promnuc_Norm", "Term_Nuc_Norm", "NET_seq", "Microarray_FC"),
+                     labels = c("Promoter TF", "Nuc", "Nuc Disorg.", "Promoter Nuc", "PAS Nuc", "Txn Rate", "Expression")) +
+    theme(panel.grid = element_blank(),
+          axis.text = element_text(color = "black")) + 
+    labs(title = "", fill = "Correlation")
+  
+  ggsave(corr_heatmap, filename = "/Users/kmoyung/supp_figures/feature_correlation_matrix.png", dpi = 800, width = 5, height = 5)
+  
+  # Save all features vs. expression change
+  features_patch <- subnuc_expr + nuc_expr + entropy_expr + promnuc_expr + term_nuc_expr + netseq_expr + plot_spacer() + pred_expr + plot_spacer() +
+  plot_annotation(tag_levels = "A") &
+    theme(plot.title = element_text(face = "bold", hjust = 0.5),
+          plot.tag = element_text(face = "bold"))
+  
+  ggsave(features_patch, filename = paste0("/Users/kmoyung/Desktop/", set, "_chromatin_feature_predictions.png"), dpi = 800, width = 8, height = 8)
+  
+}
+```
+
+## Plot subnuc/nuc occupancy changes with expression change and plot linear regression results but color points by JS
+
+```{r}
+# Color scale (low and high)
+# colscale <- c("#0091ff", "#f0650e")
+# colscale <- c("#264b96", "#bf212f")
+# colscale <- c("gold", "")
+# JS scale limits
+js_lims <- c(0, 2)
+
+# P-value threshold
+# p <- 0.0001
+p <- 0.005
+# p <- 0.0005
+# Expression threshold
+e <- 0.5
+# e <- 0.75
+# e <- 1
+# Significance threshold
+e_p <- 0.05
+
+# Label points based on the laplacian cutoff
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC >= e ~ "Up + Chrom",
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC <= -e ~ "Down + Chrom", 
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & between(Microarray_FC, -e, e) ~ "Chrom", 
+    TRUE ~ "Other"
+  ))
+
+# Filter out mutants with no significant expression+chromatin changes; we call these "unresponsive" mutants
+sub_master.df <- master.df %>%
+  group_by(Mutant) %>%
+  filter(!all(Point_Label %in% c("Other", "Chrom")))
+
+# sets <- c("All Chromatin", "Sig. Chromatin + Expression", "Silent Chromatin")
+# sets <- c("All Chromatin", "Sig. Chromatin + Expression")
+# sets <- c("Sig. Chromatin + Expression")
+sets <- c("All Chromatin")
+
+# Default limits for the scatterplots
+pred_xlims <- c(-3.5, 3.5)
+pred_xpos <- 1
+xlims <- c(-3, 3)
+ylims <- c(-5, 5)
+ypos <- -3.5
+
+plots <- list()
+
+for (set in sets) {
+  if (set == "All Chromatin") {
+    direct_indirect.df <- sub_master.df %>%
+      group_by(Mutant) %>%
+      filter(Point_Label %in% c("Up + Chrom", "Down + Chrom", "Chrom"))
+  } else if (set == "Sig. Chromatin + Expression") {
+    direct_indirect.df <- sub_master.df %>%
+      group_by(Mutant) %>%
+      filter(Point_Label %in% c("Up + Chrom", "Down + Chrom"))
+  } else {
+    direct_indirect.df <- sub_master.df %>%
+      group_by(Mutant) %>%
+      filter(Point_Label == "Chrom")
+    pred_xlims <- c(-1, 1)
+    pred_xpos <- 0.225
+    ylims <- c(-0.6, 0.6)
+    xlims <- c(-2, 2)
+    ypos <- -0.3
+  }
+  
+  # Try filtering to just direct effects (sites with motif, Rossi, or MacIsaac)
+  # direct_indirect.df <- subset(direct_indirect.df, hasMotif == 1 | Rossi_Site == 1 | MacIsaac_Site == 1)
+  
+  # Merge with NET-seq data
+  direct_indirect.df <- merge(direct_indirect.df, netseq.df, by = "Locus")
+  
+  tf_expr <- ggplot(direct_indirect.df, aes(x = TF_Change, y = Microarray_FC, fill = -log10(gamma_pvals))) + 
+    geom_hline(yintercept = 0, lty = "dashed") + 
+    geom_vline(xintercept = 0, lty = "dashed") + 
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    # scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    scale_fill_viridis(limits = js_lims, oob = scales::squish) + 
+    coord_cartesian(xlim = xlims, ylim = ylims) +
+    theme_classic() + 
+    theme(plot.title = element_text(size = 12)) + 
+    labs(x = "TF Occupancy \u0394", y = "Expression \u0394", title = "Site-specific TF Occupancy") + 
+    stat_cor(method = "pearson", label.x = 1.2, label.y = ypos, label.sep = "\n", size = 3)
+  
+  subnuc_expr <- ggplot(direct_indirect.df, aes(x = Subnuc_Norm, y = Microarray_FC, fill = -log10(gamma_pvals))) + 
+    geom_hline(yintercept = 0, lty = "dashed") + 
+    geom_vline(xintercept = 0, lty = "dashed") + 
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    # scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    scale_fill_viridis(limits = js_lims, oob = scales::squish) + 
+    coord_cartesian(xlim = xlims, ylim = ylims) +
+    theme_classic() + 
+    theme(legend.position = "none", 
+          plot.title = element_text(size = 12)) + 
+    labs(x = "TF Occupancy \u0394", y = "Expression \u0394", title = "Promoter TF Occupancy") + 
+    stat_cor(method = "pearson", label.x = 1.2, label.y = ypos, label.sep = "\n", size = 3)
+    # stat_cor(method = "pearson", label.x.npc = 0.75, label.y.npc = 0.2, label.sep = "\n")
+  
+  nuc_expr <- ggplot(direct_indirect.df, aes(x = Nuc_Norm, y = Microarray_FC, fill = -log10(gamma_pvals))) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    # scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    scale_fill_viridis(limits = js_lims, oob = scales::squish) + 
+    coord_cartesian(xlim = xlims, ylim = ylims) +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 12)) +
+    labs(x = "Nuc Occupancy \u0394", y = "Expression \u0394", title = "Nuc Occupancy") +
+    stat_cor(method = "pearson", label.x = 1.2, label.y = ypos, label.sep = "\n", size = 3)
+  
+  promnuc_expr <- ggplot(direct_indirect.df, aes(x = Promnuc_Norm, y = Microarray_FC, fill = -log10(gamma_pvals))) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    # scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    scale_fill_viridis(limits = js_lims, oob = scales::squish) + 
+    coord_cartesian(xlim = xlims, ylim = ylims) +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 12)) +
+    labs(x = "Nuc Occupancy \u0394", y = "Expression \u0394", title = "Promoter Nuc Occupancy") +
+    stat_cor(method = "pearson", label.x = 1.2, label.y = ypos, label.sep = "\n", size = 3)
+  
+  netseq_expr <- ggplot(direct_indirect.df, aes(x = NET_seq, y = Microarray_FC, fill = -log10(gamma_pvals))) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    # scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    scale_fill_viridis(limits = js_lims, oob = scales::squish) + 
+    coord_cartesian(ylim = ylims) +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 12)) +
+    labs(x = "Transcription Rate", y = "Expression \u0394", title = "Transcription Rate") +
+    stat_cor(method = "pearson", label.x = 3.8, label.y = ypos, label.sep = "\n", size = 3)
+  
+  term_subnuc_expr <- ggplot(direct_indirect.df, aes(x = Term_Subnuc_Norm, y = Microarray_FC, fill = -log10(gamma_pvals))) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    # scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    scale_fill_viridis(limits = js_lims, oob = scales::squish) + 
+    coord_cartesian(xlim = xlims, ylim = ylims) +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 12)) +
+    labs(x = "TF Occupancy \u0394", y = "Expression \u0394", title = "PAS TF Occupancy") +
+    stat_cor(method = "pearson", label.x = 1.2, label.y = ypos, label.sep = "\n", size = 3)
+
+  term_nuc_expr <- ggplot(direct_indirect.df, aes(x = Term_Nuc_Norm, y = Microarray_FC, fill = -log10(gamma_pvals))) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    # scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    scale_fill_viridis(limits = js_lims, oob = scales::squish) + 
+    coord_cartesian(xlim = xlims, ylim = ylims) +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 12)) +
+    labs(x = "Nuc Occupancy \u0394", y = "Expression \u0394", title = "PAS Nuc Occupancy") +
+    stat_cor(method = "pearson", label.x = 1.2, label.y = ypos, label.sep = "\n", size = 3)
+  
+  entropy_expr <- ggplot(direct_indirect.df, aes(x = Nuc_Entropy_Change, y = Microarray_FC, fill = -log10(gamma_pvals))) +
+    geom_hline(yintercept = 0, lty = "dashed") +
+    geom_vline(xintercept = 0, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    # scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    scale_fill_viridis(limits = js_lims, oob = scales::squish) + 
+    coord_cartesian(xlim = c(-0.05, 0.05), ylim = ylims) +
+    theme_classic() +
+    theme(legend.position = "none",
+          plot.title = element_text(size = 12)) +
+    labs(x = "Nuc Disorganization \u0394", y = "Expression \u0394", title = "Nuc Disorganization") +
+    stat_cor(method = "pearson", label.x = 0.015, label.y = ypos, label.sep = "\n", size = 3)
+  
+  ## Fit a simple linear regression model on these to predict gene expression
+  library(glmnet)
+  
+  # Assess different features 
+  add_features <- c("Nuc_Entropy_Change", "Term_Nuc_Norm", "Promnuc_Norm", "NET_seq", "hasMotif", "MacIsaac_Site", "Rossi_Site")
+  cur_formula <- "Microarray_FC ~ Subnuc_Norm + Nuc_Norm"
+  fits <- list()
+  fits[[cur_formula]] <- lm(formula(cur_formula), data = direct_indirect.df)
+  for (feature in add_features) {
+    cur_formula <- paste0(cur_formula, " + ", feature)
+    fits[[cur_formula]] <- lm(formula(cur_formula), data = direct_indirect.df)
+  }
+
+  # Make predictions with each fit and plot
+  pred_plots <- list()
+  for (fit in fits) {
+    fit_name <- gsub("\\s+", " ", paste(as.character(deparse(formula(fit))), collapse = ""))
+
+    direct_indirect.df$Predicted_Microarray <- predict.lm(fit, newdata = direct_indirect.df)
+
+    pred_plots[[fit_name]] <- ggplot(direct_indirect.df, aes(x = Predicted_Microarray, y = Microarray_FC, fill = -log10(gamma_pvals))) +
+      geom_abline(intercept = 0, slope = 1, lty = "dashed") +
+      geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+      # scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+      scale_fill_viridis(limits = js_lims, oob = scales::squish) + 
+      coord_cartesian(xlim = pred_xlims, ylim = ylims) +
+      theme_classic() +
+        theme(legend.position = "none",
+              plot.title = element_text(size = 10)) +
+        labs(x = "Predicted Expression \u0394", y = "True Expression \u0394", title = str_wrap(fit_name, 30)) +
+      stat_cor(method = "pearson", label.x = pred_xpos, label.y = ypos, label.sep = "\n", size = 3)
+
+  }
+
+  patch <- wrap_plots(pred_plots, ncol = 3, nrow = 3)
+  ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/", set, "_prediction_various_features_js.png"), dpi = 800, width = 9, height = 9)
+  
+  final_fit <- lm(Microarray_FC ~ Subnuc_Norm + Nuc_Norm + Nuc_Entropy_Change + Term_Nuc_Norm + Promnuc_Norm + NET_seq, data = direct_indirect.df)
+  
+
+  direct_indirect.df$Predicted_Microarray <- predict.lm(final_fit, newdata = direct_indirect.df)
+  
+  pred_expr <- ggplot(direct_indirect.df, aes(x = Predicted_Microarray, y = Microarray_FC, fill = -log10(gamma_pvals))) +
+    geom_abline(intercept = 0, slope = 1, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    # scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    scale_fill_viridis(limits = js_lims, oob = scales::squish) + 
+    coord_cartesian(xlim = pred_xlims, ylim = ylims) +
+    theme_classic() +
+      theme(legend.position = "none",
+            plot.title = element_text(size = 12)) +
+      labs(x = "Predicted Expression \u0394", y = "True Expression \u0394", title = "Model Predictions") +
+    stat_cor(method = "pearson", label.x = pred_xpos, label.y = ypos, label.sep = "\n", size = 3)
+
+  # Generate correlation matrix
+  corr <- round(cor(direct_indirect.df[, c("Subnuc_Norm", "Nuc_Norm", "Nuc_Entropy_Change", "Term_Nuc_Norm", "Promnuc_Norm", "NET_seq", "Microarray_FC")]), 2)
+  corr_heatmap <- ggcorrplot::ggcorrplot(corr, outline.col = "black", lab = T, type = "upper", colors = c("#FFD400", "white", "#8ABC40")) +
+    scale_x_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Nuc_Entropy_Change",  "Promnuc_Norm", "Term_Nuc_Norm", "NET_seq", "Microarray_FC"),
+                     labels = c("Promoter TF", "Nuc", "Nuc Disorg.", "Promoter Nuc", "PAS Nuc", "Txn Rate", "Expression")) +
+    scale_y_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Nuc_Entropy_Change",  "Promnuc_Norm", "Term_Nuc_Norm", "NET_seq", "Microarray_FC"),
+                     labels = c("Promoter TF", "Nuc", "Nuc Disorg.", "Promoter Nuc", "PAS Nuc", "Txn Rate", "Expression")) +
+    theme(panel.grid = element_blank(),
+          axis.text = element_text(color = "black")) + 
+    labs(title = "", fill = "Correlation")
+  
+  ggsave(corr_heatmap, filename = "/Users/kmoyung/supp_figures/feature_correlation_matrix.png", dpi = 800, width = 5, height = 5)
+  
+  # Save all features vs. expression change
+  features_patch <- subnuc_expr + nuc_expr + entropy_expr + promnuc_expr + term_nuc_expr + netseq_expr + plot_spacer() + pred_expr + plot_spacer() +
+  plot_annotation(tag_levels = "A") &
+    theme(plot.title = element_text(face = "bold", hjust = 0.5),
+          plot.tag = element_text(face = "bold"))
+  
+  ggsave(features_patch, filename = paste0("/Users/kmoyung/Desktop/", set, "_chromatin_feature_predictions_js.png"), dpi = 800, width = 8, height = 8)
+  
+}
+```
+
+## Plot an unlabeled version of predicted vs. observed gene expression for figure
+
+```{r}
+pred_figure <- ggplot(direct_indirect.df, aes(x = Predicted_Microarray, y = Microarray_FC, fill = Microarray_FC)) +
+    geom_abline(intercept = 0, slope = 1, lty = "dashed") +
+    geom_point(pch = 21, color = "black", size = 2.5, alpha = 0.75) +
+    scale_fill_gradient(low = colscale[1], high = colscale[2], limits = c(-2, 2), oob = scales::squish) +
+    coord_cartesian(xlim = pred_xlims, ylim = ylims) +
+    theme_classic() +
+      theme(legend.position = "none",
+            plot.title = element_blank(), 
+            axis.text = element_blank(), 
+            axis.ticks = element_blank()) +
+      labs(x = "Predicted Expression \u0394", y = "True Expression \u0394")
+
+pred_figure
+
+ggsave(pred_figure, filename = "/Users/kmoyung/Desktop/regression_model_cartoon.png", dpi = 800, width = 3, height = 3)
+```
+
+
+## Use the best training set to train the linear, svr, and dt models
+
+```{r}
+# Set the subset for training
+# trainset <- "Silent"
+trainset <- "Top"
+
+# P-value threshold
+p <- 0.0005
+# Expression threshold
+e <- 0.5
+# Label points based on these thresholds
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    lnorm_pvals < p & Microarray_FC >= e ~ "Up + Chrom",
+    lnorm_pvals < p & Microarray_FC <= -e ~ "Down + Chrom",
+    lnorm_pvals < p & between(Microarray_FC, -e, e) ~ "Chrom",
+    TRUE ~ "Other"
+  ))
+
+# Filter out mutants with no significant expression+chromatin changes; we call these "unresponsive" mutants
+sub_master.df <- master.df %>%
+  group_by(Mutant) %>%
+  filter(!all(Point_Label %in% c("Other", "Chrom")))
+
+# Filter to contain all significant chromatin changes and label direct effects
+cutoff <- -0.5
+if (trainset == "Top") {
+  direct_indirect.df <- sub_master.df %>%
+  mutate(DirectBinding = ifelse(hasMotif == 1 & TF_Change <= cutoff, 1, 0)) %>%
+  group_by(Mutant) %>%
+  filter(Point_Label %in% c("Up + Chrom", "Down + Chrom"))
+} else if (trainset == "Silent") {
+  direct_indirect.df <- sub_master.df %>%
+  mutate(DirectBinding = ifelse(hasMotif == 1 & TF_Change <= cutoff, 1, 0)) %>%
+  group_by(Mutant) %>%
+  filter(Point_Label %in% c("Chrom"))
+}
+
+# Try filtering to just direct effects (sites with motif)
+direct_indirect.df <- subset(direct_indirect.df, hasMotif == 1)
+
+# Calculate nucleosome entropies
+direct_indirect.df$Nuc_Entropy <- calc_nuc_disorg(direct_indirect.df)
+direct_indirect.df$Nuc_Entropy <- as.numeric(direct_indirect.df$Nuc_Entropy)
+
+# Plot individual chromatin features with expression
+xlims <- c(-4, 4)
+ylims <- c(-4, 4)
+line_a <- 0.2 # line alpha
+line_t <- "dashed" # line type
+tf_expr <- ggplot(direct_indirect.df, aes(x = TF_Change, y = Microarray_FC, fill = Microarray_FC)) + 
+  geom_hline(yintercept = 0, lty = "solid", alpha = line_a) + 
+  geom_vline(xintercept = 0, lty = "solid", alpha = line_a) + 
+  geom_abline(intercept = 0, slope = 1, lty = line_t, alpha = line_a) + 
+  geom_point(pch = 21, color = "black", size = 2.5) + 
+  scale_fill_gradient(low = "#0091ff", high = "#f0650e") +
+  coord_cartesian(xlim = xlims, ylim = ylims, clip = "off") + 
+  theme_classic() + 
+  theme(legend.position = "none", 
+        plot.title = element_text(size = 12, hjust = 0.5, face = "bold")) + 
+  labs(x = "TF Occupancy \u0394 (log2 FC)", y = "Expression \u0394 (log2 FC)", title = "Site-specific TF Occupancy \u0394") + 
+  stat_cor(method = "pearson", label.x = 0.9, label.y = -2, label.sep = "\n")
+
+subnuc_expr <- ggplot(direct_indirect.df, aes(x = Subnuc_Norm, y = Microarray_FC, fill = Microarray_FC)) + 
+  geom_hline(yintercept = 0, lty = "solid", alpha = line_a) + 
+  geom_vline(xintercept = 0, lty = "solid", alpha = line_a) + 
+  geom_abline(intercept = 0, slope = 1, lty = line_t, alpha = line_a) + 
+  geom_point(pch = 21, color = "black", size = 2.5) + 
+  scale_fill_gradient(low = "#0091ff", high = "#f0650e") +
+  coord_cartesian(xlim = xlims, ylim = ylims, clip = "off") + 
+  theme_classic() + 
+  theme(legend.position = "none", 
+         plot.title = element_text(size = 12, hjust = 0.5, face = "bold")) + 
+  labs(x = "TF Occupancy \u0394 (log2 FC)", y = "Expression \u0394 (log2 FC)", title = "Promoter TF Occupancy \u0394") + 
+  stat_cor(method = "pearson", label.x = 0.9, label.y = -2, label.sep = "\n")
+
+nuc_expr <- ggplot(direct_indirect.df, aes(x = Nuc_Norm, y = Microarray_FC, fill = Microarray_FC)) + 
+  geom_hline(yintercept = 0, lty = "solid", alpha = line_a) + 
+  geom_vline(xintercept = 0, lty = "solid", alpha = line_a) + 
+  geom_abline(intercept = 0, slope = -1, lty = line_t, alpha = line_a) + 
+  geom_point(pch = 21, color = "black", size = 2.5) + 
+  scale_fill_gradient(low = "#0091ff", high = "#f0650e") +
+  coord_cartesian(xlim = xlims, ylim = ylims, clip = "off") + 
+  theme_classic() + 
+  theme(legend.position = "none", 
+        plot.title = element_text(size = 12, hjust = 0.5, face = "bold")) + 
+  labs(x = "Nuc Occupancy \u0394 (log2 FC)", y = "Expression \u0394 (log2 FC)", title = "Nuc Occupancy \u0394") + 
+  stat_cor(method = "pearson", label.x = 0.9, label.y = 2, label.sep = "\n")
+
+entropy_expr <- ggplot(direct_indirect.df, aes(x = Nuc_Entropy, y = Microarray_FC, fill = Microarray_FC)) + 
+  geom_hline(yintercept = 0, lty = "solid", alpha = line_a) + 
+  geom_vline(xintercept = 0, lty = "solid", alpha = line_a) + 
+  geom_abline(intercept = 0, slope = 1, lty = line_t, alpha = line_a) + 
+  geom_point(pch = 21, color = "black", size = 2.5) + 
+  scale_fill_gradient(low = "#0091ff", high = "#f0650e") +
+  coord_cartesian(xlim = xlims, ylim = ylims, clip = "off") + 
+  theme_classic() + 
+  theme(legend.position = "none", 
+        plot.title = element_text(size = 12, hjust = 0.5, face = "bold")) + 
+  labs(x = "Nuc Disorganization \u0394 (log2)", y = "Expression \u0394 (log2 FC)", title = "Nuc Disorganization \u0394") + 
+  stat_cor(method = "pearson", label.x = 0.9, label.y = -2, label.sep = "\n")
+
+feature_plots <- (tf_expr + subnuc_expr) / (nuc_expr + entropy_expr)
+ggsave(feature_plots, filename = paste0("/Users/kmoyung/Desktop/featureplots_", trainset, ".png"), dpi = 800, width = 7, height = 6)
+
+# Fit a simple linear regression model on these to predict gene expression
+fit2 <- lm(Microarray_FC ~ TF_Change + Subnuc_Norm + Nuc_Norm + Nuc_Entropy, data = direct_indirect.df)
+fit <- lm(Microarray_FC ~ Subnuc_Norm + Nuc_Norm + Nuc_Entropy, data = direct_indirect.df)
+
+# Make predictions on the fitted values
+direct_indirect.df$Predicted_Microarray <- predict(fit)
+
+# Fit a support vector regression model
+svr_fit2 <- svm(Microarray_FC ~ Subnuc_Norm + Nuc_Norm + Nuc_Entropy, data = direct_indirect.df)
+# svr_fit <- svm(Microarray_FC ~ TF_Change + Subnuc_Norm + Nuc_Norm + Nuc_Entropy, data = direct_indirect.df)
+direct_indirect.df$Predicted_Microarray_SVR <- predict(svr_fit2, data = direct_indirect.df)
+# Tune SVR model
+# set.seed(1)
+# tuned_svr_fit <- tune(svm, Microarray_FC ~ TF_Change + Subnuc_Norm + Nuc_Norm + Nuc_Entropy, data = direct_indirect.df, 
+#                       ranges = list(cost = c(0.1,1,10,100,1000), gamma = c(0.1,0.25,0.5,1,2,3,4), epsilon = seq(0, 1, 0.1)))
+# direct_indirect.df$Predicted_Microarray_SVR_Tuned <- predict(tuned_svr_fit$best.model, data = direct_indirect.df)
+
+# Fit a decision tree model
+dt_fit <- rpart(Microarray_FC ~ TF_Change + Subnuc_Norm + Nuc_Norm + Nuc_Entropy, data = direct_indirect.df, method = "anova")
+direct_indirect.df$Predicted_Microarray_DT <- predict(dt_fit, direct_indirect.df, method = "anova")
+
+# Evaluate models
+lm_pred_expr <- ggplot(direct_indirect.df, aes(x = Predicted_Microarray, y = Microarray_FC, fill = Microarray_FC)) + 
+  geom_abline(intercept = 0, slope = 1, lty = "dashed", alpha = line_a) + 
+  geom_point(pch = 21, color = "black", size = 2.5) + 
+  scale_fill_gradient(low = "#0091ff", high = "#f0650e", limits = c(-4, 4), oob = scales::squish) +
+  coord_cartesian(xlim = c(-4, 4), ylim = c(-4, 4)) +
+  theme_classic() + 
+    theme(legend.position = "none", 
+          plot.title = element_text(size = 12, hjust = 0.5, face = "bold")) + 
+    labs(x = "Predicted Expression \u0394 (log2 FC)", y = "True Expression \u0394 (log2 FC)", title = "Linear Regression \n Predicted vs. True Expression") + 
+  stat_cor(aes(label = paste(..rr.label.., sep = "~`,`~")), method = "pearson", label.x = 1.75, label.y = -2)
+
+svr_pred_expr <- ggplot(direct_indirect.df, aes(x = Predicted_Microarray_SVR, y = Microarray_FC, fill = Microarray_FC)) + 
+  geom_abline(intercept = 0, slope = 1, lty = "dashed", alpha = line_a) + 
+  geom_point(pch = 21, color = "black", size = 2.5) + 
+  scale_fill_gradient(low = "#0091ff", high = "#f0650e", limits = c(-4, 4), oob = scales::squish) +
+  coord_cartesian(xlim = c(-4, 4), ylim = c(-4, 4)) +
+  theme_classic() + 
+    theme(legend.position = "none", 
+          plot.title = element_text(size = 12, hjust = 0.5, face = "bold")) + 
+    labs(x = "Predicted Expression \u0394 (log2 FC)", y = "True Expression \u0394 (log2 FC)", title = "SVR Predicted vs. True Expression") + 
+  stat_cor(aes(label = paste(..rr.label.., sep = "~`,`~")), method = "pearson", label.x = 1.75, label.y = -2)
+
+dt_pred_expr <- ggplot(direct_indirect.df, aes(x = Predicted_Microarray_DT, y = Microarray_FC, fill = Microarray_FC)) + 
+  geom_abline(intercept = 0, slope = 1, lty = "dashed", alpha = line_a) + 
+  geom_point(pch = 21, color = "black", size = 2.5) + 
+  scale_fill_gradient(low = "#0091ff", high = "#f0650e", limits = c(-4, 4), oob = scales::squish) +
+  coord_cartesian(xlim = c(-4, 4), ylim = c(-4, 4)) +
+  theme_classic() + 
+    theme(legend.position = "none", 
+          plot.title = element_text(size = 12, hjust = 0.5, face = "bold")) + 
+    labs(x = "Predicted Expression \u0394 (log2 FC)", y = "True Expression \u0394 (log2 FC)", title = "DT Predicted vs. True Expression") + 
+  stat_cor(aes(label = paste(..rr.label.., sep = "~`,`~")), method = "pearson", label.x = 1.75, label.y = -2)
+
+patch <- lm_pred_expr + svr_pred_expr + dt_pred_expr
+
+ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/model_evaluation_", trainset,".png"), dpi = 800, width = 12, height = 4)
+
+# # Use this model to predict other subsets of data
+# sets <- c("All Chromatin", "Silent Chromatin")
+# 
+# # Default limits for the scatterplots
+# pred_xlims <- c(-4, 4)
+# pred_xpos <- 0.9
+# xlims <- c(-3, 3)
+# ylims <- c(-5, 5)
+# ypos <- -3
+# 
+# for (set in sets) {
+#   if (set == "All Chromatin") {
+#     pred_set.df <- sub_master.df %>%
+#       group_by(Mutant) %>%
+#       filter(Point_Label %in% c("Up + Chrom", "Down + Chrom", "Chrom"))
+#   } else if (set == "Sig. Chromatin + Expression") {
+#     pred_set.df <- sub_master.df %>%
+#       group_by(Mutant) %>%
+#       filter(Point_Label %in% c("Up + Chrom", "Down + Chrom"))
+#   } else {
+#     pred_set.df <- sub_master.df %>%
+#       group_by(Mutant) %>%
+#       filter(Point_Label == "Chrom")
+#     pred_xlims <- c(-1, 1)
+#     pred_xpos <- 0.225
+#     ylims <- c(-0.6, 0.6)
+#     xlims <- c(-2, 2)
+#     ypos <- -0.3
+#   }
+#   
+#   # Remove NAs
+#   pred_set.df <- na.omit(pred_set.df)
+#   
+#   # Calculate nucleosome entropies
+#   pred_set.df$Nuc_Entropy <- calc_nuc_disorg(pred_set.df)
+#   pred_set.df$Nuc_Entropy <- as.numeric(pred_set.df$Nuc_Entropy)
+#   
+#   # Predict using LM model
+#   pred_set.df$Predicted_Microarray <- predict(fit, newdata = pred_set.df)
+#   # Predict using SVR model
+#   pred_set.df$Predicted_Microarray_SVR <- predict(svr_fit, newdata = pred_set.df)
+#   # Predict using DT model
+#   pred_set.df$Predicted_Microarray_DT <- predict(dt_fit, method = "anova", newdata = pred_set.df)
+#   
+#   lm_pred_expr <- ggplot(pred_set.df, aes(x = Predicted_Microarray, y = Microarray_FC, fill = Microarray_FC)) + 
+#     geom_abline(intercept = 0, slope = 1, lty = "dashed") + 
+#     geom_point(pch = 21, color = "black", size = 2.5) + 
+#     scale_fill_gradient(low = "#0091ff", high = "#f0650e", limits = c(-4, 4), oob = scales::squish) +
+#     # scale_fill_manual(values = c("1" = "cyan", "0" = "grey70")) + 
+#     coord_cartesian(xlim = c(-4, 4), ylim = c(-4, 4)) +
+#     theme_classic() + 
+#       theme(legend.position = "none", 
+#             plot.title = element_text(size = 12)) + 
+#       labs(x = "Predicted Expression \u0394 (log2 FC)", y = "True Expression \u0394 (log2 FC)", title = "LM Predicted vs. True Expression") + 
+#     stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), method = "pearson", label.x = .75, label.y = -2)
+#   
+#   svr_pred_expr <- ggplot(pred_set.df, aes(x = Predicted_Microarray_SVR, y = Microarray_FC, fill = Microarray_FC)) + 
+#     geom_abline(intercept = 0, slope = 1, lty = "dashed") + 
+#     geom_point(pch = 21, color = "black", size = 2.5) + 
+#     scale_fill_gradient(low = "#0091ff", high = "#f0650e", limits = c(-4, 4), oob = scales::squish) +
+#     # scale_fill_manual(values = c("1" = "cyan", "0" = "grey70")) + 
+#     coord_cartesian(xlim = c(-4, 4), ylim = c(-4, 4)) +
+#     theme_classic() + 
+#       theme(legend.position = "none", 
+#             plot.title = element_text(size = 12)) + 
+#       labs(x = "Predicted Expression \u0394 (log2 FC)", y = "True Expression \u0394 (log2 FC)", title = "SVR Predicted vs. True Expression") + 
+#     stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), method = "pearson", label.x = .75, label.y = -2)
+#   
+#   dt_pred_expr <- ggplot(pred_set.df, aes(x = Predicted_Microarray_DT, y = Microarray_FC, fill = Microarray_FC)) + 
+#     geom_abline(intercept = 0, slope = 1, lty = "dashed") + 
+#     geom_point(pch = 21, color = "black", size = 2.5) + 
+#     scale_fill_gradient(low = "#0091ff", high = "#f0650e", limits = c(-4, 4), oob = scales::squish) +
+#     # scale_fill_manual(values = c("1" = "cyan", "0" = "grey70")) + 
+#     coord_cartesian(xlim = c(-4, 4), ylim = c(-4, 4)) +
+#     theme_classic() + 
+#       theme(legend.position = "none", 
+#             plot.title = element_text(size = 12)) + 
+#       labs(x = "Predicted Expression \u0394 (log2 FC)", y = "True Expression \u0394 (log2 FC)", title = "DT Predicted vs. True Expression") + 
+#     stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")), method = "pearson", label.x = .75, label.y = -2)
+#   
+#   patch <- lm_pred_expr + svr_pred_expr + dt_pred_expr + plot_annotation(title = set) &
+#     theme(plot.title = element_text(face = "bold"))
+# 
+#   ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/predictions_", set,"_train_", trainset,".png"), dpi = 800, width = 12, height = 4)
+# }
+```
+
+## Compute R^2 and RMSE values across varying cutoffs of JS pval and expression
+
+```{r}
+# JS divergence p-value cutoffs
+p_cutoffs <- c(0.001, 0.0005, 0.0001, 0.00005, 0.00001)
+
+# Expression cutoffs
+e_cutoffs <- c(0, 0.25, 0.5, 0.75, 0.85, 1, 1.2, 1.5, 2)
+
+r2_values.df <- data.frame(p_cutoff = 0, e_cutoff = 0, 
+                           lm_r2 = 0, lm_rmse = 0, 
+                           svr_r2 = 0, svr_rmse = 0,
+                           n = 0)
+
+for (p in p_cutoffs) {
+  for (e in e_cutoffs) {
+    # Label points based on these thresholds
+    master.df <- master.df %>%
+      mutate(Point_Label = case_when(
+        lnorm_pvals < p & Microarray_FC >= e ~ "Up + Chrom",
+        lnorm_pvals < p & Microarray_FC <= -e ~ "Down + Chrom",
+        lnorm_pvals < p & between(Microarray_FC, -e, e) ~ "Chrom",
+        TRUE ~ "Other"
+      ))
+    
+    # Filter out mutants with no significant expression+chromatin changes; we call these "unresponsive" mutants
+    sub_master.df <- master.df %>%
+      group_by(Mutant) %>%
+      filter(!all(Point_Label %in% c("Other", "Chrom")))
+    
+    # Filter to contain all significant chromatin changes and label direct effects
+    cutoff <- -0.5
+    direct_indirect.df <- sub_master.df %>%
+      mutate(DirectBinding = ifelse(hasMotif == 1 & TF_Change <= cutoff, 1, 0)) %>%
+      group_by(Mutant) %>%
+      filter(Point_Label %in% c("Up + Chrom", "Down + Chrom"))
+   
+    # Try filtering to just direct effects (sites with motif)
+    direct_indirect.df <- subset(direct_indirect.df, hasMotif == 1)
+    
+    # Calculate nucleosome entropies
+    direct_indirect.df$Nuc_Entropy <- calc_nuc_disorg(direct_indirect.df)
+    direct_indirect.df$Nuc_Entropy <- as.numeric(direct_indirect.df$Nuc_Entropy)
+
+    # Fit a simple linear regression model on these to predict gene expression
+    fit <- lm(Microarray_FC ~ Subnuc_Norm + Nuc_Norm + Nuc_Entropy, data = direct_indirect.df)
+
+    # Make predictions on the fitted values
+    direct_indirect.df$Predicted_Microarray <- predict(fit)
+
+    # Fit a support vector regression model
+    svr_fit <- svm(Microarray_FC ~ Subnuc_Norm + Nuc_Norm + Nuc_Entropy, data = direct_indirect.df)
+    direct_indirect.df$Predicted_Microarray_SVR <- predict(svr_fit, data = direct_indirect.df)
+
+    lm_r2 <- cor(direct_indirect.df$Microarray_FC, direct_indirect.df$Predicted_Microarray) ^ 2
+    lm_rmse <- RMSE(direct_indirect.df$Microarray_FC, direct_indirect.df$Predicted_Microarray)
+    svr_r2 <- cor(direct_indirect.df$Microarray_FC, direct_indirect.df$Predicted_Microarray_SVR) ^ 2
+    svr_rmse <- RMSE(direct_indirect.df$Microarray_FC, direct_indirect.df$Predicted_Microarray_SVR)
+    num <- nrow(direct_indirect.df)
+    vec <- c(p, e, lm_r2, lm_rmse, svr_r2, svr_rmse, num)
+    # print(vec)
+    r2_values.df <- rbind(r2_values.df, vec)
+  }
+}
+
+r2_values.df <- r2_values.df[-1, ]
+```
+
+Plot the results
+
+```{r}
+lm_r2_plot <- ggplot(r2_values.df, aes(x = as.factor(p_cutoff), y = as.factor(e_cutoff), fill = lm_r2)) + 
+  geom_tile(color = "black") + 
+  scale_fill_viridis(limits = c(0.1, 1)) + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 70, hjust = 1, color = "black"),
+        axis.text.y = element_text(color = "black"), 
+        plot.title = element_text(face = "bold", hjust = 0.5), 
+        legend.position = "none") + 
+  # coord_fixed() + 
+  geom_text(aes(label = round(lm_r2, 2))) + 
+  labs(y = "Expression", x = "Chromatin P-Value", color = bquote(R^2),
+       size = "# of Genes",
+       title = bquote('Linear Model'~R^2))
+
+lm_rmse_plot <- ggplot(r2_values.df, aes(x = as.factor(p_cutoff), y = as.factor(e_cutoff), fill = lm_rmse)) + 
+  geom_tile(color = "black") + 
+  scale_fill_viridis(limits = c(0.1, 1)) + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 70, hjust = 1, color = "black"),
+        axis.text.y = element_text(color = "black"), 
+        plot.title = element_text(face = "bold", hjust = 0.5), 
+        legend.position = "none") + 
+  # coord_fixed() + 
+  geom_text(aes(label = round(lm_rmse, 2))) + 
+  labs(y = "Expression", x = "Chromatin P-Value", color = bquote(RMSE),
+       size = "# of Genes",
+       title = bquote('Linear Model'~RMSE))
+
+svr_r2_plot <- ggplot(r2_values.df, aes(x = as.factor(p_cutoff), y = as.factor(e_cutoff), fill = svr_r2)) + 
+  geom_tile(color = "black") + 
+  scale_fill_viridis(limits = c(0.1, 1)) + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 70, hjust = 1, color = "black"),
+        axis.text.y = element_text(color = "black"), 
+        plot.title = element_text(face = "bold", hjust = 0.5), 
+        legend.position = "none") + 
+  # coord_fixed() + 
+  geom_text(aes(label = round(svr_r2, 2))) + 
+  labs(y = "Expression", x = "Chromatin P-Value", color = bquote(R^2),
+       size = "# of Genes",
+       title = bquote('SVR Model'~R^2))
+
+svr_rmse_plot <- ggplot(r2_values.df, aes(x = as.factor(p_cutoff), y = as.factor(e_cutoff), fill = svr_rmse)) + 
+  geom_tile(color = "black") + 
+  scale_fill_viridis(limits = c(0.1, 1)) + 
+  theme_classic() + 
+  theme(axis.text.x = element_text(angle = 70, hjust = 1, color = "black"),
+        axis.text.y = element_text(color = "black"), 
+        plot.title = element_text(face = "bold", hjust = 0.5), 
+        legend.position = "none") + 
+  # coord_fixed() + 
+  geom_text(aes(label = round(svr_rmse, 2))) + 
+  labs(y = "Expression", x = "Chromatin P-Value", color = bquote(RMSE),
+       size = "# of Genes",
+       title = bquote('SVR Model'~RMSE))
+
+# patch <- (lm_r2_plot | lm_rmse_plot) / (svr_r2_plot | svr_rmse_plot) + plot_layout(guides = "collect")
+# ggsave(patch, filename = "/Users/kmoyung/Desktop/model_cuttoffs.png", dpi = 800, width = 7, height = 5)
+patch <- lm_r2_plot + svr_r2_plot + plot_layout(guides = "collect")
+ggsave(patch, filename = "/Users/kmoyung/Desktop/model_cuttoffs.png", dpi = 800, width = 5, height = 3)
+patch
+
+```
+## Plot ROC curves
+
+```{r}
+library(pROC)
+
+direct_indirect.df$txn <- ifelse(ifelse(sig_chrom.df$Microarray_FC > 0, "Up", "Down"))
+
+# Fit a support vector regression model
+svr_fit1 <- svm(Microarray_FC ~ Subnuc_Norm , data = direct_indirect.df)
+svr_fit2 <- svm(Microarray_FC ~ Nuc_Norm, data = direct_indirect.df)
+svr_fit3 <- svm(Microarray_FC ~ Nuc_Entropy, data = direct_indirect.df)
+svr_fit4 <- svm(Microarray_FC ~ Subnuc_Norm + Nuc_Norm + Nuc_Entropy, data = direct_indirect.df)
+direct_indirect.df$Predicted_Microarray_SVR <- predict(svr_fit, data = direct_indirect.df)
+
+# Classify up/down regulated
+sig_chrom.df$pred_txn <- (ifelse(sig_chrom.df$Predicted_Microarray > 0, "Up", "Down"))
+sig_chrom.df$txn <- (ifelse(sig_chrom.df$Microarray_FC > 0, "Up", "Down"))
+
+rocobj <- roc(sig_chrom.df$Microarray_FC, sig_chrom.df$Predicted_Microarray)
+```

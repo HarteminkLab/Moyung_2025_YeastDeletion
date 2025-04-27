@@ -1,0 +1,516 @@
+---
+title: "Combine Mutant Quantifications"
+output: html_notebook
+---
+
+# Combine all the mutant quantifications with other datasets
+
+```{r}
+# Source the base code and functions
+if (Sys.info()[['sysname']] == "Windows") {
+  source("C:/Users/Kevin/Desktop/MacAlpine_KM/Code/get_midpoints.R")
+  gene.df = read.csv("D:/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv",header = T)
+} else {
+  gene.df = read.csv("/Users/kmoyung/MacAlpine_KM/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv", header = T)
+  source("/Users/kmoyung/MacAlpine_KM/Code/get_midpoints.R")
+}
+
+# Filter out genes with low MNase-seq coverage (must have > 70% read coverage)
+filtered_genes <- fread("/Users/kmoyung/MacAlpine_KM/Metadata/filtered_genes_70coverage.txt", header = T)
+```
+
+## Compile all mutants into one dataframe
+
+```{r}
+for (i in 1:nrow(mutants)) {
+  mut <- mutants$V1[i]
+  # diff.df <- readRDS(paste0("/Users/kmoyung/mutant_diffs_v4/", mut, "_quantifications.RDS"))
+  diff.df <- readRDS(paste0("/Users/kmoyung/mutant_diffs_length_corrected/", mut, "_quantifications_length_corrected.RDS"))
+  diff.df <- diff.df[diff.df$Locus %in% filtered_genes$x, ]
+  
+  diff.df$Mutant <- mut
+  
+  if (i == 1) {
+    master.df <- diff.df
+  } else {
+    master.df <- rbind(master.df, diff.df)
+  }
+}
+```
+
+Remove NaN's and infinite values
+
+```{r}
+# Remove rows with infinite values
+master.df <- master.df[is.finite(master.df$Subnuc_Change), ]
+master.df <- master.df[is.finite(master.df$Promnuc_Change), ]
+master.df <- master.df[is.finite(master.df$Nuc_Change), ]
+master.df <- master.df[is.finite(master.df$PromJS), ]
+master.df <- master.df[is.finite(master.df$WindowJS), ]
+master.df <- master.df[is.finite(master.df$GeneJS), ]
+master.df <- master.df[is.finite(master.df$TermJS), ]
+master.df <- master.df[is.finite(master.df$Term_Subnuc_Change), ]
+master.df <- master.df[is.finite(master.df$Term_Nuc_Change), ]
+```
+
+## Remove the mutant-pair interaction
+
+```{r}
+master.df <- subset(master.df, Mutant != Locus)
+```
+
+## Remove genes that are within 250bp flanking a mutant's gene (e.g. SMC4 at the ARP6 locus)
+
+```{r}
+# Iterate through each mutant and remove loci that are within 250bp of a mutant's gene
+for (mut in mutants$V1) { 
+  coords <- gene.df[gene.df$alias == mut, c("name", "alias", "tss", "chrom", "strand", "left_coord", "right_coord")]
+  chr <- coords$chrom[1]
+  start <- coords$left_coord[1] - 250
+  end <- coords$right_coord[1] + 250
+  genes_sub <- get_genes(chr, start, end)
+  master.df <- subset(master.df, !(Mutant == mut & Locus %in% genes_sub$alias))
+}
+```
+
+## Remove genes with length <= 500bp (these short genes tend to throw off the quantification metrics)
+
+```{r}
+# Plot gene lengths with median JS divergence
+gene_js.df <- master.df %>% 
+  group_by(Locus) %>%
+  mutate(Median_JS = median(WindowJS))
+
+gene_js.df <- gene_js.df[, c("Locus", "Median_JS")]
+gene_js.df <- unique(gene_js.df)
+gene_length.df <- data.frame(Locus = gene.df$alias, Length = (gene.df$right_coord - gene.df$left_coord))
+gene_js.df <- merge(gene_js.df, gene_length.df)
+
+short_genes <- subset(gene_js.df, Length <= 500)
+
+master.df <- subset(master.df, !(Locus %in% short_genes$Locus))
+```
+
+## Remove the weird technical artifacts of nucleosome evictions in certain mutant+loci
+
+```{r}
+eviction_matrix <- readRDS("/Users/kmoyung/Desktop/eviction_matrix_2.RDS")
+
+# Remove empty rows
+eviction_matrix <- eviction_matrix[rowSums(eviction_matrix) > 0, ]
+# Remove empty columns
+eviction_matrix <- eviction_matrix[, colSums(eviction_matrix) > 0]
+
+# Associate the nucleosome with the closest gene (within the gene body)
+nuc_names <- colnames(eviction_matrix)
+nuc_names.df <- data.frame(String = nuc_names)
+nuc_names.df <- nuc_names.df %>% separate(String, c("Chrom", "Pos"))
+nuc_names.df$Gene <- ""
+
+for (i in 1:nrow(nuc_names.df)) {
+  sub_gene <- subset(gene.df, chrom == nuc_names.df$Chrom[i] & between(as.numeric(nuc_names.df$Pos[i]), left_coord, right_coord))
+  if (nrow(sub_gene) == 0) {
+    nuc_names.df$Gene[i] <- "NA"
+  } else {
+    nuc_names.df$Gene[i] <- sub_gene$alias[1]
+  }
+}
+nuc_names.df$Name <- paste0(nuc_names.df$Chrom, "_", nuc_names.df$Pos)
+
+# Remove mutant+locus pairs if nucleosomes are completely evicted
+remove_rows.df <- data.frame(Mutant = "", Locus = "")
+for (i in 1:nrow(eviction_matrix)) {
+  cur_mut <- rownames(eviction_matrix)[i]
+  for (k in 1:ncol(eviction_matrix)) {
+    cur_nuc <- colnames(eviction_matrix)[k]
+    # Map the nucleosome to nearest gene; if it maps back to NA, then skip
+    cur_gene <- nuc_names.df$Gene[match(cur_nuc, nuc_names.df$Name)]
+    if (cur_gene == "NA") {
+      next
+    }
+    # Check if the nucleosome is evicted for this mutant-locus pair; if so, then drop this row from master.df
+    if (eviction_matrix[i, k] == 1) {
+      remove_rows.df <- rbind(remove_rows.df, c(cur_mut, cur_gene))
+    }
+  }
+}
+remove_rows.df <- remove_rows.df[-1, ]
+master.df <- anti_join(master.df, remove_rows.df, by = c("Mutant", "Locus"))
+```
+
+## Read in the microarray data from Kemmeren et al. 
+
+```{r}
+library(data.table)
+# Read in all the gene expression data (Kemmeren)
+expression <- fread("/Users/kmoyung/Downloads/deleteome_all_mutants_ex_wt_var_controls.txt", header = T)
+# expression <- fread("D:/Kemmeren_Dataset/deleteome_all_mutants_ex_wt_var_controls.txt", header = T)
+expression <- expression[-1, ]
+expression.df <- data.frame(expression)
+```
+
+## Get aliases for certain mutants that match with Kemmeren et al. expression data
+
+```{r}
+unmatched.df <- readxl::read_xlsx("/Users/kmoyung/MacAlpine_KM/Metadata/Unmatched_Mutants.xlsx")
+unmatched.df <- subset(unmatched.df, Type == "Alias")
+```
+
+Keep the FC and mutant information
+
+```{r}
+sub_expression.df <- expression.df[, c("geneSymbol", grep(".*\\.del.matA.vs..wt.matA$|.*\\.del.vs..wt$", colnames(expression.df), value = T, fixed = F))]
+
+colnames(sub_expression.df) <- c("Locus", lapply(strsplit(toupper(colnames(sub_expression.df[, -1])), split = ".", fixed = T), '[[', 1))
+sub_expression.df[, -1] <- sapply(sub_expression.df[, -1], as.numeric)
+```
+
+Keep the p-values
+
+```{r}
+sub_pvals.df <- expression.df[, c("geneSymbol", grep(".*\\.del.matA.vs..wt.matA.2$|.*\\.del.vs..wt.2$", colnames(expression.df), value = T, fixed = F))]
+
+colnames(sub_pvals.df) <- c("Locus", lapply(strsplit(toupper(colnames(sub_pvals.df[, -1])), split = ".", fixed = T), '[[', 1))
+sub_pvals.df[, -1] <- sapply(sub_pvals.df[, -1], as.numeric)
+```
+Keep the A-values
+
+```{r}
+sub_avals.df <- expression.df[, c("geneSymbol", grep(".*\\.del.matA.vs..wt.matA.1$|.*\\.del.vs..wt.1$", colnames(expression.df), value = T, fixed = F))]
+
+colnames(sub_avals.df) <- c("Locus", lapply(strsplit(toupper(colnames(sub_avals.df[, -1])), split = ".", fixed = T), '[[', 1))
+sub_avals.df[, -1] <- sapply(sub_avals.df[, -1], as.numeric)
+```
+
+Melt into long format and merge with master.df
+
+```{r}
+melted_expression.df <- melt(sub_expression.df, id.vars = "Locus")
+colnames(melted_expression.df) <- c("Locus", "Mutant", "Microarray_FC")
+
+melted_pvals.df <- melt(sub_pvals.df, id.vars = "Locus")
+colnames(melted_pvals.df) <- c("Locus", "Mutant", "Microarray_Pval")
+
+melted_avals.df <- melt(sub_avals.df, id.vars = "Locus")
+colnames(melted_avals.df) <- c("Locus", "Mutant", "Microarray_Aval")
+
+melted.df <- melted_expression.df %>% 
+  left_join(melted_pvals.df, by = c("Locus", "Mutant")) %>%
+  left_join(melted_avals.df, by = c("Locus", "Mutant"))
+
+# Replace Mutant with Matched_Name where available
+melted.df$Mutant <- as.character(melted.df$Mutant)
+melted.df <- melted.df %>%
+  mutate(Mutant = ifelse(Mutant %in% unmatched.df$Matched_Name, unmatched.df$Unmatched_Mutant, Mutant))
+
+# Merge and keep all observations even without microarray data
+master.df <- left_join(master.df, melted.df, by = c("Locus", "Mutant"))
+
+master.df$Microarray_FC <- as.numeric(master.df$Microarray_FC)
+master.df$Microarray_Pval <- as.numeric(master.df$Microarray_Pval)
+master.df$Microarray_Aval <- as.numeric(master.df$Microarray_Aval)
+```
+
+## Normalize by the total number of subnuc counts across all genes for each mutant
+
+```{r}
+# Calculate total occupancies across all genes per mutant
+per_mutant_occupancy.df <- master.df %>%
+  group_by(Mutant) %>%
+  summarise(Total_Mut_Subnucs = sum(Mut_Subnucs), 
+            Total_Control_Subnucs = sum(Control_Subnucs), 
+            Total_Mut_Promnucs = sum(Mut_Promnucs), 
+            Total_Control_Promnucs = sum(Control_Promnucs), 
+            Total_Mut_Nucs = sum(Mut_Nucs), 
+            Total_Control_Nucs = sum(Control_Nucs), 
+            Total_Term_Mut_Subnucs = sum(Term_Mut_Subnucs), 
+            Total_Term_Control_Subnucs = sum(Term_Control_Subnucs), 
+            Total_Term_Mut_Nucs = sum(Term_Mut_Nucs), 
+            Total_Term_Control_Nucs = sum(Term_Control_Nucs))
+```
+
+```{r}
+# Normalize the occupancies by their totals (of all genes) and compute the new fold changes
+master.df <- merge(master.df, per_mutant_occupancy.df, by = "Mutant")
+
+master.df$Subnuc_Norm <- log2((master.df$Mut_Subnucs / master.df$Total_Mut_Subnucs) / (master.df$Control_Subnucs / master.df$Total_Control_Subnucs))
+master.df$Promnuc_Norm <- log2((master.df$Mut_Promnucs / master.df$Total_Mut_Promnucs) / (master.df$Control_Promnucs / master.df$Total_Control_Promnucs))
+master.df$Nuc_Norm <- log2((master.df$Mut_Nucs / master.df$Total_Mut_Nucs) / (master.df$Control_Nucs / master.df$Total_Control_Nucs))
+master.df$Term_Subnuc_Norm <- log2((master.df$Term_Mut_Subnucs / master.df$Total_Term_Mut_Subnucs) / (master.df$Term_Control_Subnucs / master.df$Total_Term_Control_Subnucs))
+master.df$Term_Nuc_Norm <- log2((master.df$Term_Mut_Nucs / master.df$Total_Term_Mut_Nucs) / (master.df$Term_Control_Nucs / master.df$Total_Term_Control_Nucs))
+```
+
+## Scale the JS divergence by the median JS divergence 
+
+```{r}
+jsmedians.df <- master.df %>% 
+  group_by(Mutant) %>% 
+  summarise(MedianPromJS = median(PromJS), 
+            MedianWindowJS = median(WindowJS), 
+            MedianGeneJS = median(GeneJS))
+
+master.df <- merge(master.df, jsmedians.df, by = "Mutant")
+
+master.df$PromJS_Norm <- master.df$PromJS / master.df$MedianPromJS
+master.df$WindowJS_Norm <- master.df$WindowJS / master.df$MedianWindowJS
+master.df$GeneJS_Norm <- master.df$GeneJS / master.df$MedianGeneJS
+```
+
+## Scale the JS divergence by the sum of the JS divergence
+
+```{r}
+per_mutant_js_sum.df <- master.df %>%
+  group_by(Mutant) %>%
+  summarise(WindowJS_Sum = sum(WindowJS), 
+            PromJS_Sum = sum(PromJS), 
+            GeneJS_Sum = sum(GeneJS))
+
+# Normalize the occupancies by their totals (of all genes) and compute the new JS
+master.df <- merge(master.df, per_mutant_js_sum.df, by = "Mutant")
+
+master.df$WindowJS_Scale <- master.df$WindowJS / master.df$WindowJS_Sum
+master.df$PromJS_Scale <- master.df$PromJS / master.df$PromJS_Sum
+master.df$GeneJS_Scale <- master.df$GeneJS / master.df$GeneJS_Sum
+```
+
+## Perform quantile normalization of the JS scores per mutant
+
+```{r}
+# library(preprocessCore)
+# # Convert from long to wide format
+# wide.df <- master.df[, c("Mutant", "Locus", "WindowJS")] %>%
+#   distinct() %>% 
+#   spread(Mutant, WindowJS)
+# 
+# rownames(wide.df) <- wide.df[, 1]
+# wide_mat <- as.matrix(wide.df[, -1])
+# 
+# # Perform quantile normalization and convert back to long format
+# norm_wide_mat <- normalize.quantiles(wide_mat)
+# norm_wide.df <- as.data.frame(norm_wide_mat)
+# colnames(norm_wide.df) <- colnames(wide_mat)
+# norm_wide.df <- cbind(wide.df$Locus, norm_wide.df)
+# colnames(norm_wide.df)[1] <- "Locus"
+# 
+# norm_long.df <- norm_wide.df %>%
+#   gather(key = Mutant, value = WindowJS_QuantNorm, ACA1:ZAP1, factor_key = F) %>%
+#   na.omit()
+# 
+# # Merge with master.df
+# master.df <- merge(master.df, norm_long.df, by = c("Mutant", "Locus"))
+```
+
+## Calculate the variance of JS scores
+
+```{r}
+master.df <- master.df %>%
+  group_by(Mutant) %>%
+  mutate(WindowJS_Var = var(WindowJS))
+```
+
+## Read-in all the TF-gene direct regulatory pairs from YTRP and create training labels
+
+```{r}
+regulatory.df <- fread(file = "/Users/kmoyung/MacAlpine_KM/Metadata/YTRP/TRP_direct_regulatory_network.txt", header = F)
+# regulatory.df <- fread(file = "C:/Users/Kevin/Desktop/MacAlpine_KM/Metadata/YTRP/TRP_direct_regulatory_network.txt", header = F)
+colnames(regulatory.df) <- c("TF", "Gene", "Condition", "Pathway")
+# Subset for the control condition only
+regulatory.df <- subset(regulatory.df, Condition == "Unstressed log-phase growth (control)")
+# Add column for general pair
+regulatory.df$Pair <- paste0(toupper(regulatory.df$TF), "_", regulatory.df$Gene)
+regulatory.df$True_Interaction <- 1
+```
+
+Label my dataset with these known labels to create training labels
+
+```{r}
+master.df$True_Interaction <- 0
+for (i in 1:nrow(master.df)) {
+  first <- master.df$Mutant[i]
+  second <- master.df$Locus[i]
+  if (paste0(first, "_", second) %in% regulatory.df$Pair) {
+    master.df$True_Interaction[i] <- 1
+  }
+}
+```
+
+## Subset for only direct interactions and label in my dataset
+
+```{r}
+library(stringr)
+direct_regulatory.df <- subset(regulatory.df, str_count(Pathway, pattern = "->") == 1)
+
+master.df$True_Direct_Interaction <- 0
+for (i in 1:nrow(master.df)) {
+  first <- master.df$Mutant[i]
+  second <- master.df$Locus[i]
+  if (paste0(first, "_", second) %in% direct_regulatory.df$Pair) {
+    master.df$True_Direct_Interaction[i] <- 1
+  }
+}
+```
+
+## Read MacIsaac Sites
+
+Assign binding site locations to nearest gene TSS
+
+```{r}
+macisaac.df <- get_macisaac()
+macisaac.df$Target <- ""
+for (i in 1:nrow(macisaac.df)) {
+  cur_chr <- macisaac.df$chrom[i]
+  left <- macisaac.df$left_coord[i]
+  right <- macisaac.df$right_coord[i]
+  cur_strand <- macisaac.df$strand[i]
+  if (cur_strand == "+") {
+    sub_genes <- subset(gene.df, chrom == cur_chr & strand == cur_strand & between(((left + right) / 2), (tss - 250), tss))
+  } else {
+    sub_genes <- subset(gene.df, chrom == cur_chr & strand == cur_strand & between(((left + right) / 2), tss, (tss + 250)))
+  }
+  
+  if (nrow(sub_genes) > 0) {
+    macisaac.df$Target[i] <- sub_genes$alias[1]
+  } else {
+    macisaac.df$Target[i] <- NA
+  }
+}
+macisaac.df$pair <- paste0(macisaac.df$alias, "_", macisaac.df$Target)
+```
+
+Label Pairs in data with MacIsaac binding evidence
+
+```{r}
+master.df$Pair <- paste0(master.df$Mutant, "_", master.df$Locus)
+master.df$MacIsaac_Site <- ifelse(master.df$Pair %in% macisaac.df$pair, 1, 0)
+```
+
+## Read Rossi sites
+
+Assign Rossi binding site locations to nearest gene TSS
+
+```{r}
+rossi.df <- get_rossi_all()
+rossi.df$Target <- ""
+for (i in 1:nrow(rossi.df)) {
+  cur_chr <- rossi.df$chrom[i]
+  left <- rossi.df$peakStart[i]
+  right <- rossi.df$peakEnd[i]
+
+  sub_genes <- subset(gene.df, chrom == cur_chr & (between(((left + right) / 2), (tss - 250), tss) | between(((left + right) / 2), tss, (tss + 250))))
+  
+  if (nrow(sub_genes) > 0) {
+    rossi.df$Target[i] <- sub_genes$alias[1]
+  } else {
+    rossi.df$Target[i] <- NA
+  }
+}
+rossi.df$pair <- paste0(toupper(rossi.df$name), "_", rossi.df$Target)
+```
+
+Label Pairs in data with Rossi binding evidence
+
+```{r}
+master.df$Pair <- paste0(master.df$Mutant, "_", master.df$Locus)
+master.df$Rossi_Site <- ifelse(master.df$Pair %in% rossi.df$pair, 1, 0)
+```
+
+## Read motif information from FIMO
+
+```{r}
+# Read in all FIMO hits
+all_fimo.df <- readRDS("/Users/kmoyung/fimo_motifs/all_fimo_1e-04.RDS")
+# Truncate midpoint to whole number
+all_fimo.df$midpoint <- trunc(all_fimo.df$midpoint)
+# Change MBP1::SWI6 to just SWI6
+all_fimo.df <- all_fimo.df %>%
+  mutate(motif_id = stringr::str_replace(motif_id, "MBP1::SWI6", "SWI6"))
+
+# Read in the mapped promoters
+mapped_promoters.df <- readRDS("/Users/kmoyung/MacAlpine_KM/Metadata/mapped_promoters.RDS")
+colnames(mapped_promoters.df) <- c("midpoint", "seqnames", "Gene")
+
+# Match motifs with promoters and assign them to genes
+all_fimo.df <- dplyr::left_join(all_fimo.df, mapped_promoters.df, by = c("seqnames", "midpoint"), multiple = "all")
+
+# Remove rows with NA genes
+all_fimo.df <- all_fimo.df %>%
+  dplyr::filter(!is.na(Gene))
+
+# Label motifs
+master.df$hasMotif <- ifelse(paste(master.df$Mutant, master.df$Locus) %in% paste(all_fimo.df$motif_id, all_fimo.df$Gene), 1, 0)
+```
+
+## Remove duplicate rows
+
+```{r}
+master.df <- distinct(master.df)
+```
+
+## Read in specific TF occupancy changes for motif hits
+
+```{r}
+# Read in the TF occupancies
+tf_list <- list.files("/Users/kmoyung/mutant_tf_occupancy/", full.names = T)
+for (i in 1:length(tf_list)) {
+  mut_tf.df <- readRDS(tf_list[i])
+  if (i == 1) {
+    all_mut_tf.df <- mut_tf.df
+  } else {
+    all_mut_tf.df <- rbind(all_mut_tf.df, mut_tf.df)
+  }
+}
+
+# Calculate log2 fold change normalized by the total number of subnuc fragments
+all_mut_tf.df <- all_mut_tf.df %>%
+  mutate(TF_Change = log2((Mut_TF_Occ / sum(Mut_TF_Occ)) / (Control_TF_Occ / sum(Control_TF_Occ)))) %>%
+  filter(!is.infinite(TF_Change))
+
+# Remove duplicate loci, keeping the largest absolute TF change
+all_mut_tf.df <- all_mut_tf.df %>%
+  group_by(Mutant, Locus) %>%
+  top_n(1, abs(TF_Change))
+
+# Merge with master.df
+master.df <- left_join(master.df, all_mut_tf.df, by = c("Mutant", "Locus"))
+```
+
+## Fit the JS scores to a lognormal and gamma distribution and compute p-values
+
+```{r}
+library(fitdistrplus)
+master.df <- master.df %>%
+  group_by(Mutant) %>%
+  mutate(lnorm_pvals = plnorm(WindowJS, meanlog = fitdist(WindowJS, "lnorm")$estimate[1], sdlog = fitdist(WindowJS, "lnorm")$estimate[2], lower.tail = F), 
+         term_lnorm_pvals = plnorm(TermJS, meanlog = fitdist(TermJS, "lnorm")$estimate[1], sdlog = fitdist(TermJS, "lnorm")$estimate[2], lower.tail = F), 
+         gamma_pvals = pgamma(WindowJS, shape = fitdist(WindowJS, "gamma")$estimate[1], rate = fitdist(WindowJS, "gamma")$estimate[2], lower.tail = F))
+```
+
+## Calculate nucleosome entropy change
+
+```{r}
+master.df <- master.df %>%
+  mutate(Nuc_Entropy_Change = log2(Mut_Nuc_Entropy / Control_Nuc_Entropy))
+```
+
+
+## Label these interactions as their primary chromatin change
+
+```{r}
+master.df$Chrom_Label <- ifelse(abs(master.df$Subnuc_Norm) > abs(master.df$Nuc_Norm), "Subnuc", ifelse(abs(master.df$Nuc_Norm) > abs(master.df$Subnuc_Norm), "Nuc", "Other"))
+master.df$Specific_Chrom_Label <- ifelse(master.df$Chrom_Label == "Subnuc" & master.df$Subnuc_Norm > 0, "Subnuc Gain", ifelse(master.df$Chrom_Label == "Subnuc" & master.df$Subnuc_Norm < 0, "Subnuc Loss", ifelse(master.df$Chrom_Label == "Nuc" & master.df$Nuc_Norm > 0, "Nuc Gain", "Nuc Loss")))
+```
+
+## Remove duplicate rows
+
+```{r}
+master.df <- master.df %>% 
+  distinct(Mutant, Locus, .keep_all = T)
+```
+
+## Save to RDS file
+```{r}
+master.df <- data.frame(master.df)
+# saveRDS(master.df, file = "/Users/kmoyung/Desktop/master_diff.RDS")
+saveRDS(master.df, file = "/Users/kmoyung/Desktop/master_diff_length_corrected.RDS")
+```
+

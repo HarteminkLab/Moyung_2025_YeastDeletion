@@ -1,0 +1,120 @@
+---
+title: "Chromatin feature histograms"
+output: html_notebook
+---
+
+## Load libraries
+
+```{r}
+library(ggplot2)
+library(ggmagnify)
+```
+
+
+## Load the master dataframe
+
+```{r}
+master.df <- readRDS("/Users/kmoyung/Desktop/master_diff_length_corrected.RDS")
+```
+
+## Plot histograms
+
+Plot JS histogram with magnification
+
+```{r}
+# Set coordinates of the magnification and inset
+from <- c(xmin = 5, xmax = 10, ymin = 0, ymax = 1e3)
+to <- c(xmin = 10, xmax = 20, ymin = 1e5, ymax = 4e5)
+
+js_hist <- ggplot(master.df, aes(x = -log10(gamma_pvals))) + 
+  geom_histogram(bins = 75, color = "black", fill = "#B5651D") + 
+  theme_classic() + 
+  labs(x = "-log10(P-Value)", y = "# of Interactions", title = "Overall Chromatin (JS Divergence)") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold")) + 
+  coord_cartesian(xlim = c(0,30), expand = c(0,0)) + 
+  geom_magnify(from = from, to = to, axes = "xy")
+
+js_hist
+```
+
+Plot TF occupancy histogram with magnification
+
+```{r}
+# Set coordinates of the magnification and inset
+from_down <- c(xmin = -2, xmax = -1, ymin = 0, ymax = 1e3)
+to_down <- c(xmin = -2.75, xmax = -1, ymin = 2e4, ymax = 1e5)
+
+from_up <- c(xmin = 1, xmax = 2, ymin = 0, ymax = 1e3)
+to_up <- c(xmin = 1, xmax = 2.75, ymin = 2e4, ymax = 1e5)
+
+tf_hist <- ggplot(master.df, aes(x = Subnuc_Norm)) + 
+  geom_histogram(bins = 50, color = "black", fill = "#FDB863") + 
+  theme_classic() + 
+  labs(x = "Log2FC", y = "# of Interactions", title = "TF Occupancy ∆") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold")) + 
+  coord_cartesian(xlim = c(-3, 3), expand = c(0,0)) + 
+  geom_magnify(from = from_down, to = to_down, axes = "xy") +
+  geom_magnify(from = from_up, to = to_up, axes = "xy")
+
+tf_hist
+```
+
+Plot Nuc occupancy histogram with magnification
+
+```{r}
+# Set coordinates of the magnification and inset
+from_down <- c(xmin = -1, xmax = -0.5, ymin = 0, ymax = 1e3)
+to_down <- c(xmin = -1.75, xmax = -0.5, ymin = 2e4, ymax = 1e5)
+
+from_up <- c(xmin = 0.5, xmax = 1, ymin = 0, ymax = 1e3)
+to_up <- c(xmin = 0.5, xmax = 1.75, ymin = 2e4, ymax = 1e5)
+
+nuc_hist <- ggplot(master.df, aes(x = Nuc_Norm)) + 
+  geom_histogram(bins = 50, color = "black", fill = "#8073AC") + 
+  theme_classic() + 
+  labs(x = "Log2FC", y = "# of Interactions", title = "Nucleosome Occupancy ∆") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold")) + 
+  coord_cartesian(xlim = c(-2, 2), expand = c(0,0)) + 
+  geom_magnify(from = from_down, to = to_down, axes = "xy") +
+  geom_magnify(from = from_up, to = to_up, axes = "xy")
+
+nuc_hist
+```
+
+Plot Nuc disorganization histogram with magnification (separate from the rest)
+
+```{r}
+# Set coordinates of the magnification and inset
+from_down <- c(xmin = -0.035, xmax = -0.025, ymin = 0, ymax = 1e3)
+to_down <- c(xmin = -0.0475, xmax = -0.025, ymin = 2e4, ymax = 1e5)
+
+from_up <- c(xmin = 0.025, xmax = 0.035, ymin = 0, ymax = 1e3)
+to_up <- c(xmin = 0.025, xmax = 0.0475, ymin = 2e4, ymax = 1e5)
+
+nuc_entropy_hist <- ggplot(master.df, aes(x = Nuc_Entropy_Change)) + 
+  geom_histogram(bins = 50, color = "black", fill = "#8073AC") + 
+  theme_classic() + 
+  labs(x = "Log2FC", y = "# of Interactions", title = "Nucleosome Disorganization ∆") + 
+  theme(plot.title = element_text(hjust = 0.5, face = "bold")) + 
+  coord_cartesian(xlim = c(-0.05, 0.05), expand = c(0,0)) + 
+  geom_magnify(from = from_down, to = to_down, axes = "y") +
+  geom_magnify(from = from_up, to = to_up, axes = "y")
+
+nuc_entropy_hist
+ggsave(nuc_entropy_hist, filename = "/Users/kmoyung/supp_figures/nuc_entropy.png", dpi = 800, width = 5, height = 4)
+```
+
+Patch all plots together
+
+```{r}
+# patch <- (js_hist / tf_hist / nuc_hist)
+  # plot_annotation(tag_levels = list(c("D", "E", "F", "G"))) &
+  # theme(plot.tag = element_text(face = "bold"))
+# ggsave(patch, filename = "/Users/kmoyung/Desktop/chromatin_histograms.png", dpi = 800, width = 6.25, height = 9)
+
+patch <- (js_hist + tf_hist + nuc_hist + nuc_entropy_hist) + 
+  plot_annotation(tag_levels = "A") & 
+  theme(plot.tag = element_text(face = "bold"))
+ggsave(patch, filename = "/Users/kmoyung/Desktop/chromatin_histograms.png", dpi = 800, width = 12, height = 8)
+```
+

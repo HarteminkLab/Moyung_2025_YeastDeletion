@@ -1,0 +1,1523 @@
+---
+title: "Plot Typhoon Plots"
+output: html_notebook
+---
+
+```{r}
+# Source the base code and functions
+if (Sys.info()[['sysname']] == "Windows") {
+  source("C:/Users/Kevin/Desktop/MacAlpine_KM/Code/get_midpoints.R")
+  gene.df = read.csv("D:/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv",header = T)
+} else {
+  # Read in sample IDs for MNase-seq and RNA-seq files
+  sample_IDs <- read.table("/Users/kmoyung/MacAlpine_KM/mnase_rna_sampleIDs.txt", header = F)
+  gene.df = read.csv("/Users/kmoyung/MacAlpine_KM/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv", header = T)
+  source("/Users/kmoyung/MacAlpine_KM/Code/get_midpoints.R")
+  source("/Users/kmoyung/MacAlpine_KM/Code/sample_by_fragment_length.R")
+  source("/Users/kmoyung/MacAlpine_KM/Code/plot_js_scores.R")
+}
+```
+
+
+## Override existing typhoon plot functions
+
+```{r}
+library(gggenes)
+# Plot genes using the gggenes package
+plot_genes <- function(locus, chr, start, end) {
+  geneplot <- ggplot(subset(gene.df, chrom == chr & (between(tss, start, end) | between(pas, start, end))),
+                       aes(xmin = left_coord, xmax = right_coord, y = 1, forward = ifelse(strand == "+", 1, 0), label = alias)) +
+      geom_gene_arrow(fill = "grey90", arrow_body_height = grid::unit(6, "mm"), 
+                      arrowhead_height = unit(6, "mm"), 
+                      arrowhead_width = unit(1, "mm")) +
+      geom_feature(aes(x = ifelse(strand == "+", left_coord, right_coord), forward = ifelse(strand == "+", 1, 0), y = 1), 
+                   feature_height = unit(6, "mm")) + 
+      geom_text(data = subset(gene.df, chrom == chr & (between(tss, start, end) | between(pas, start, end))), aes(x = ifelse(strand == "+", left_coord + 300, right_coord - 300), label = alias), fontface = "bold.italic", size = 2.5) + 
+      theme_void() +
+      coord_cartesian(xlim = c(start, end), clip = "on", expand = c(0,0))
+  return(geneplot)
+}
+
+# Plot sample typhoon plot
+plot_sample_typhoon <- function(mut, chr, start, end, prom_start, prom_end) {
+  
+  # Get the sample df
+  mid.df <- get_samples(mut, chr)
+  
+  # Get the control df
+  control.df <- get_controls(chr, mut)
+  
+  # Re-sample by fragment length distribution in the control
+  mid.df <- sample_by_fragment_length(mid.df, control.df)
+  
+  # Subset for the locus
+  mid.df <- subset(mid.df, mid >= start & mid <= end)
+  
+  # Print the number of MNase-seq reads
+  print(paste0("# of Reads in ", mut, "∆: ", nrow(mid.df)))
+  
+  # Calculate smoothed density values
+  mid.df$density <- get_density(mid.df$mid, mid.df$length, 
+                                         n = 200, 
+                                         h = c(25, 30))
+  
+  # Calculate color scale limit based on window length
+  color_lim <- c(0, 0.08 / (end - start))
+  
+  plot_sample <- ggplot(mid.df[order(mid.df$density), ]) + 
+    geom_rect(xmin = prom_start, xmax = prom_end, ymin = 0, ymax = 250, fill = "grey90") + 
+    # geom_point(aes(x = mid, y = length), size = 0.45, shape = 20, fill = "gray") +
+    geom_point(aes(x = mid, y = length, color = density), size = 0.45, shape = 20) +
+    # scale_color_gradientn(colors = rev(magma(6)[-1]), limits = c(0, 0.00003), oob = scales::squish) +
+    scale_color_gradientn(colors = rev(magma(6)[-1]), limits = color_lim, oob = scales::squish) +
+    # ggtitle(paste0(tolower(mut),"\u0394")) +
+    theme_bw() +
+    theme(panel.grid = element_blank(), 
+          legend.position = "none", 
+          plot.title = element_text(face = "italic")) + 
+    labs(y = "Length", x = chr, color = "Density") +
+    coord_cartesian(xlim = c(start, end), expand = c(0, 0))
+  
+  return(plot_sample)
+}
+
+# Plot control typhoon plot
+plot_control_typhoon <- function(chr, start, end, mut, prom_start, prom_end) {
+  # Get the control df
+  control.df <- get_controls(chr, mut)
+  
+  # Subset for the locus
+  control.df <- subset(control.df, mid >= start & mid <= end)
+  
+  # Print the number of MNase-seq reads
+  print(paste0("# of Reads in Control: ", nrow(control.df)))
+  
+  # Calculate smoothed density values
+  control.df$density <- get_density(control.df$mid, control.df$length,
+                                    n = 200,
+                                    h = c(25, 30))
+  
+  # Test: Calculate color scale limit based on window length
+  color_lim <- c(0, 0.08 / (end - start))
+
+  plot_control <- ggplot(control.df[order(control.df$density), ]) +
+    geom_rect(xmin = prom_start, xmax = prom_end, ymin = 0, ymax = 250, fill = "grey90") +
+    # geom_point(aes(x = mid, y = length), size = 0.45, shape = 20, fill = "gray") +
+    geom_point(aes(x = mid, y = length, color = density), size = 0.45, shape = 20) +
+    # scale_color_gradientn(colors = rev(magma(6)[-1]), limits = c(0, 0.00003), oob = scales::squish) +
+    scale_color_gradientn(colors = rev(magma(6)[-1]), limits = color_lim, oob = scales::squish) +
+    # ggtitle(paste0("Control")) +
+    theme_bw() +
+    theme(panel.grid = element_blank(), 
+          legend.position = "none", 
+          axis.text.x = element_blank(), 
+          axis.title.x = element_blank()) +
+    labs(y = "Length", x = chr, color = "Density") +
+    coord_cartesian(xlim = c(start, end), expand = c(0, 0))
+  
+  return(plot_control)
+}
+
+```
+
+
+## Read-in master.df
+
+```{r}
+master.df <- readRDS("/Users/kmoyung/Desktop/master_diff_length_corrected.RDS")
+```
+
+## Plot GAL example
+
+```{r}
+mut <- "GAL80"
+locus <- "GAL1"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+# start <- coords$tss[1] - 1000
+# end <- coords$tss[1] + 800
+
+start <- coords$tss[1] - 5000
+end <- coords$tss[1] + 5000
+
+# Get special promoter window for both GAL1 and GAL10
+prom_start <- 278352
+prom_end <- 279020
+
+geneplot <- plot_genes("GAL", chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+gal80_patch <- geneplot / plot_spacer() / controlplot / sampleplot + plot_layout(heights = c(1.5, -0.5, 1, 1))
+gal80_patch
+# ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_GAL1_GAL10_typhoon.png"), dpi = 800, width = 4, height = 3.5)
+ggsave(gal80_patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_GAL1_GAL10_typhoon_new.png"), dpi = 800, width = 14, height = 5.5)
+```
+
+
+## Plot typhoon plot of one mutant
+
+```{r}
+mut <- "BAS1"
+locus <- "ADE12"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "pas")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+# up_offset <- 300
+# down_offset <- 800
+# up_offset <- 500
+# down_offset <- 1000
+# up_offset <- 1000
+# down_offset <- 1000
+up_offset <- 2000
+down_offset <- 2000
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$tss[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+} else {
+  start <- coords$tss[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+}
+
+# Use below to plot entire gene body
+# up_offset <- 800
+# down_offset <- 800
+# 
+# if (strand == "+") {
+#   start <- coords$tss[1] - up_offset
+#   end <- coords$pas[1] + down_offset
+#   prom_start <- coords$tss[1] - 250
+#   prom_end <- coords$tss[1]
+# } else {
+#   start <- coords$pas[1] - down_offset
+#   end <- coords$tss[1] + up_offset
+#   prom_start <- coords$tss[1]
+#   prom_end <- coords$tss[1] + 250
+# }
+
+binding_start <- coords$tss[1] - 200
+binding_end <- coords$tss[1] + 200
+
+geneplot <- plot_genes(locus, chr, start, end)
+nb <- 40
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end) 
+
+# Add "plot" for global y-axis
+# yaxis <- ggplot(data.frame(l = "Fragment Length", x = 1, y = -1)) +
+#   geom_text(aes(x, y, label = l), angle = 90, size = 5) + 
+#   theme_void() +
+#   coord_cartesian(clip = "off")
+
+# controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5)) +
+#   labs(x = "")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5))
+patch <- (geneplot / controlplot / sampleplot) + plot_annotation(title = paste0(tolower(mut),"\u0394"), theme = theme(plot.title = element_text(hjust = 0.5, face = "italic"), 
+      axis.title = element_blank()))
+patch
+# ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_", locus, "_typhoon.png"), dpi = 800, width = 4, height = 3)
+ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_", locus, "_typhoon_new.png"), dpi = 800, width = 4, height = 3)
+```
+
+## Plot four of the best examples
+
+```{r}
+## gal80∆ on GAL1-10
+mut <- "GAL80"
+locus <- "GAL1"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+start <- coords$tss[1] - 2000
+end <- coords$tss[1] + 2000
+
+# Get special promoter window for both GAL1 and GAL10
+prom_start <- 278352
+prom_end <- 279020
+
+geneplot <- plot_genes(c("GAL1", "GAL10"), chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+gal80_gal1 <- geneplot / plot_spacer() / controlplot / sampleplot + plot_layout(heights = c(1.5, -0.5, 1, 1))
+gal80_gal1
+
+## gal80∆ on GAL2
+mut <- "GAL80"
+locus <- "GAL2"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "pas")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+up_offset <- 2000
+down_offset <- 2000
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$tss[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+} else {
+  start <- coords$tss[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+}
+
+geneplot <- plot_genes("GAL2", chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+gal80_gal2 <- geneplot / plot_spacer() / controlplot / sampleplot + plot_layout(heights = c(1.5, -0.5, 1, 1))
+gal80_gal2
+
+## bas1∆ on ADE17
+mut <- "BAS1"
+locus <- "ADE17"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "pas")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+up_offset <- 2000
+down_offset <- 2000
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$tss[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+} else {
+  start <- coords$tss[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+}
+
+geneplot <- plot_genes("ADE17", chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+bas1_ade17 <- geneplot / plot_spacer() / controlplot / sampleplot + plot_layout(heights = c(1.5, -0.5, 1, 1))
+bas1_ade17
+
+## bas1∆ on GCV3
+mut <- "BAS1"
+locus <- "GCV3"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "pas")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+up_offset <- 2000
+down_offset <- 2000
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$tss[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+} else {
+  start <- coords$tss[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+}
+
+geneplot <- plot_genes("GCV3", chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+bas1_gcv3 <- geneplot / plot_spacer() / controlplot / sampleplot + plot_layout(heights = c(1.5, -0.5, 1, 1))
+bas1_gcv3
+
+# Patch them all together
+typhoon_patch <- (gal80_gal1 | gal80_gal2) / (bas1_ade17 | bas1_gcv3) + plot_annotation(tag_levels = list(c("A", "", "", "B", "", "", "C", "", "", "D", "", ""))) & theme(plot.tag = element_text(face = "bold"))
+typhoon_patch
+
+ggsave(typhoon_patch, filename = "/Users/kmoyung/supp_figures/typhoon_figure.png", dpi = 800, width = 12, height = 8)
+```
+
+## Plot a few of the best typhoon plots and include JS scores
+
+```{r}
+## gal80∆ on GAL1-10
+mut <- "GAL80"
+locus <- "GAL1"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+start <- coords$tss[1] - 2000
+end <- coords$tss[1] + 2000
+
+# Get special promoter window for both GAL1 and GAL10
+prom_start <- 278352
+prom_end <- 279020
+
+geneplot <- plot_genes(c("GAL1", "GAL10"), chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank(), axis.text.x = element_blank()) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+gal80_gal1 <- geneplot / plot_spacer() / controlplot / sampleplot / plot_js_scores(mut, chr, start, end, c()) + plot_layout(heights = c(1.5, -0.5, 1, 1, 1))
+gal80_gal1
+
+## cbf1∆ on MET10
+mut <- "CBF1"
+locus <- "MET10"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "pas")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+up_offset <- 2000
+down_offset <- 2000
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$tss[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+} else {
+  start <- coords$tss[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+}
+
+geneplot <- plot_genes("MET10", chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank(), axis.text.x = element_blank()) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+cbf1_met10 <- geneplot / plot_spacer() / controlplot / sampleplot / plot_js_scores(mut, chr, start, end, c()) + plot_layout(heights = c(1.5, -0.5, 1, 1, 1))
+cbf1_met10
+
+## mbp1∆ on RAD51
+mut <- "MBP1"
+locus <- "RAD51"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "pas")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+up_offset <- 2000
+down_offset <- 2000
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$tss[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+} else {
+  start <- coords$tss[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+}
+
+geneplot <- plot_genes("RAD51", chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank(), axis.text.x = element_blank()) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+mbp1_rad51 <- geneplot / plot_spacer() / controlplot / sampleplot / plot_js_scores(mut, chr, start, end, c()) + plot_layout(heights = c(1.5, -0.5, 1, 1, 1))
+mbp1_rad51
+
+## bas1∆ on HIS4
+mut <- "BAS1"
+locus <- "HIS4"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "pas")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+up_offset <- 2000
+down_offset <- 2000
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$tss[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+} else {
+  start <- coords$tss[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+}
+
+geneplot <- plot_genes("SHM2", chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank(), axis.text.x = element_blank()) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+bas1_his4 <- geneplot / plot_spacer() / controlplot / sampleplot / plot_js_scores(mut, chr, start, end, c()) + plot_layout(heights = c(1.5, -0.5, 1, 1, 1))
+bas1_his4
+
+# Patch them all together
+typhoon_patch <- (gal80_gal1 | cbf1_met10) / (mbp1_rad51 | bas1_his4)
+typhoon_patch
+
+ggsave(typhoon_patch, filename = "/Users/kmoyung/supp_figures/typhoon_figure_js.png", dpi = 800, width = 7, height = 10)
+```
+
+## Plot an individual locus/mutant with js scores
+
+```{r}
+mut <- "GAL80"
+locus <- "GAL10"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "pas")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+up_offset <- 8000
+down_offset <- 8000
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$tss[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+} else {
+  start <- coords$tss[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+}
+
+geneplot <- plot_genes("RAD51", chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank(), axis.text.x = element_blank()) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+mbp1_rad51 <- geneplot / plot_spacer() / controlplot / sampleplot / plot_js_scores(mut, chr, start, end, c()) + plot_layout(heights = c(1.5, -0.5, 1, 1, 1))
+mbp1_rad51
+```
+
+
+## Plot a typhoon plot highlighting different chromatin features we can extract from them
+
+Override plotting functions for this
+
+```{r}
+# Plot sample typhoon plot
+plot_sample_typhoon <- function(mut, chr, start, end, prom_start, prom_end, nuc_coords, tf_coords) {
+  
+  # Get the sample df
+  mid.df <- get_samples(mut, chr)
+  
+  # Get the control df
+  control.df <- get_controls(chr, mut)
+  
+  # Re-sample by fragment length distribution in the control
+  mid.df <- sample_by_fragment_length(mid.df, control.df)
+  
+  # Subset for the locus
+  mid.df <- subset(mid.df, mid >= start & mid <= end)
+  
+  # Calculate smoothed density values
+  mid.df$density <- get_density(mid.df$mid, mid.df$length, 
+                                         n = 200, 
+                                         h = c(25, 30))
+  
+  # Calculate color scale limit based on window length
+  color_lim <- c(0, 0.08 / (end - start))
+  
+  plot_sample <- ggplot(mid.df[order(mid.df$density), ]) + 
+    geom_rect(data = tf_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = NA, alpha = 0.2, fill = "#FDB863") + 
+    geom_rect(data = nuc_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = NA, alpha = 0.2, fill = "#8073AC") + 
+    # geom_point(aes(x = mid, y = length), size = 0.45, shape = 20, fill = "gray") +
+    geom_point(aes(x = mid, y = length, color = density), size = 0.45, shape = 20) +
+    # scale_color_gradientn(colors = rev(magma(6)[-1]), limits = c(0, 0.00003), oob = scales::squish) +
+    scale_color_gradientn(colors = rev(magma(6)[-1]), limits = color_lim, oob = scales::squish) +
+    # ggtitle(paste0(tolower(mut),"\u0394")) +
+    theme_bw() +
+    theme(panel.grid = element_blank(), 
+          legend.position = "none", 
+          plot.title = element_text(face = "italic"), 
+          axis.text = element_text(size = 12)) + 
+    labs(y = "Length", x = chr, color = "Density") +
+    coord_cartesian(xlim = c(start, end), expand = c(0, 0))
+  
+  return(plot_sample)
+}
+
+# Plot control typhoon plot
+plot_control_typhoon <- function(chr, start, end, mut, prom_start, prom_end, nuc_coords, tf_coords) {
+  # Get the control df
+  control.df <- get_controls(chr, mut)
+  
+  # Subset for the locus
+  control.df <- subset(control.df, mid >= start & mid <= end)
+  
+  # Calculate smoothed density values
+  control.df$density <- get_density(control.df$mid, control.df$length,
+                                    n = 200,
+                                    h = c(25, 30))
+  
+  # Test: Calculate color scale limit based on window length
+  color_lim <- c(0, 0.08 / (end - start))
+
+  plot_control <- ggplot(control.df[order(control.df$density), ]) +
+    geom_rect(data = tf_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = NA, alpha = 0.2, fill = "#FDB863") + 
+    geom_rect(data = nuc_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = NA, alpha = 0.2, fill = "#8073AC") + 
+    # geom_point(aes(x = mid, y = length), size = 0.45, shape = 20, fill = "gray") +
+    geom_point(aes(x = mid, y = length, color = density), size = 0.45, shape = 20) +
+    # scale_color_gradientn(colors = rev(magma(6)[-1]), limits = c(0, 0.00003), oob = scales::squish) +
+    scale_color_gradientn(colors = rev(magma(6)[-1]), limits = color_lim, oob = scales::squish) +
+    # ggtitle(paste0("Control")) +
+    theme_bw() +
+    theme(panel.grid = element_blank(), 
+          legend.position = "none", 
+          # axis.text.x = element_blank(), 
+          axis.title.x = element_blank(), 
+          axis.text = element_text(size = 12)) +
+    labs(y = "Length", x = chr, color = "Density") +
+    coord_cartesian(xlim = c(start, end), expand = c(0, 0))
+  
+  return(plot_control)
+}
+```
+
+## Plot for GAL1-10 locus
+
+```{r}
+mut <- "GAL80"
+locus <- "GAL1"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+start <- 277000
+end <- 280000
+
+print(start)
+print(end)
+
+# Get special promoter window for both GAL1 and GAL10
+prom_start <- 278352
+prom_end <- 279020
+
+# Get coordinates for promoter TF and gene body nucleosomes
+nuc_coords <- data.frame(x1 = c(277852, 279021), x2 = c(278352, 279521), y1 = c(140, 140), y2 = c(200, 200))
+tf_coords <- data.frame(x1 = c(prom_start, prom_end - 250), x2 = c(prom_start + 250, prom_end), y1 = c(40), y2 = c(100))
+
+geneplot <- plot_genes(c("GAL1", "GAL10"), chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end, nuc_coords, tf_coords)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end, nuc_coords, tf_coords)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+
+# Add boxes highlighting TF and nuc occupancy changes
+controlplot_highlight <- controlplot + 
+  geom_rect(data = tf_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "#FDB863", alpha = 1, fill = NA) + 
+  geom_rect(data = nuc_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "#8073AC", alpha = 1, fill = NA) + 
+  theme(axis.title.y = element_blank(), 
+        plot.margin = margin(0, 1, 0, 0, "cm"))
+
+sampleplot_highlight <- sampleplot + 
+  geom_rect(data = tf_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "#FDB863", alpha = 1, fill = NA) + 
+  geom_rect(data = nuc_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "#8073AC", alpha = 1, fill = NA) + 
+  theme(axis.title.y = element_blank())
+
+gal80_patch <- geneplot / plot_spacer() / controlplot_highlight / sampleplot_highlight + plot_layout(heights = c(1.5, -0.5, 1, 1))
+gal80_patch
+# ggsave(gal80_patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_GAL1_GAL10_highlight_typhoon.png"), dpi = 800, width = 5, height = 4.5)
+# ggsave(gal80_patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_GAL1_GAL10_typhoon_new.png"), dpi = 800, width = 14, height = 5.5)
+```
+
+Plot nuc and TF occupancy changes accompanying the typhoon plot above
+
+```{r}
+sub_mut.df <- subset(master.df, Mutant %in% c("GAL80") & Locus %in% c("GAL1", "GAL10"))[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm")]
+
+melt.df <- melt(sub_mut.df)
+
+melt.df$Locus <- factor(melt.df$Locus, levels = c("GAL10", "GAL1"))
+occupancy_bar <- ggplot(melt.df, aes(x = variable, y = value, fill = variable)) + 
+  geom_bar(color = "black", width = 0.5, stat = "identity") + 
+  geom_hline(yintercept = 0, color = "black") + 
+  scale_fill_manual(values = c("Subnuc_Norm" = "#FDB863", "Nuc_Norm" = "#8073AC")) +
+  scale_x_discrete(labels = c("TF \n Occupancy ∆", "Nuc \n Occupancy ∆")) + 
+  facet_wrap(.~Locus) + 
+  theme_classic() + 
+  theme(legend.position = "none", 
+        panel.grid = element_blank(), 
+        plot.title = element_text(hjust = 0.5, face = "bold.italic"),
+        # panel.border = element_blank(),
+        strip.background = element_blank(), 
+        strip.text = element_text(size = 10), 
+        axis.text = element_text(color = "black")) + 
+  labs(x = "", y = "Log2FC") + 
+  coord_flip()
+  
+occupancy_bar
+
+# ggsave(occupancy_bar, filename = "/Users/kmoyung/Desktop/gal80_occupancy.png", dpi = 800, width = 5, height = 3)
+```
+
+Test: Add occupancy changes together with typhoon plot
+
+```{r}
+figure_patch <- geneplot / plot_spacer() / controlplot_highlight / plot_spacer() / sampleplot_highlight / occupancy_bar + 
+  plot_layout(heights = c(1, 0.5, 1, 0.5, 1, 1))
+figure_patch
+
+ggsave(figure_patch, filename = "/Users/kmoyung/Desktop/typhoon_figure.png", dpi = 800, width = 6, height = 7)
+```
+
+## Plot for GAL1-10 locus
+
+```{r}
+mut <- "GAL80"
+locus <- "GAL1"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+start <- 277000
+end <- 280000
+
+print(start)
+print(end)
+
+# Get special promoter window for both GAL1 and GAL10
+prom_start <- 278352
+prom_end <- 279020
+
+# Get coordinates for promoter TF and gene body nucleosomes
+nuc_coords <- data.frame(x1 = c(277852, 279021), x2 = c(278352, 279521), y1 = c(140, 140), y2 = c(200, 200))
+tf_coords <- data.frame(x1 = c(prom_start, prom_end - 250), x2 = c(prom_start + 250, prom_end), y1 = c(40), y2 = c(100))
+
+geneplot <- plot_genes(c("GAL1", "GAL10"), chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end, nuc_coords, tf_coords)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end, nuc_coords, tf_coords)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+
+# Add boxes highlighting TF and nuc occupancy changes
+controlplot_highlight <- controlplot + 
+  geom_rect(data = tf_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "#FDB863", alpha = 1, fill = NA) + 
+  geom_rect(data = nuc_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "#8073AC", alpha = 1, fill = NA) + 
+  theme(axis.title.y = element_blank(), 
+        plot.margin = margin(0, 1, 0, 0, "cm"))
+
+sampleplot_highlight <- sampleplot + 
+  geom_rect(data = tf_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "#FDB863", alpha = 1, fill = NA) + 
+  geom_rect(data = nuc_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "#8073AC", alpha = 1, fill = NA) + 
+  theme(axis.title.y = element_blank())
+
+gal80_patch <- geneplot / plot_spacer() / controlplot_highlight / sampleplot_highlight + plot_layout(heights = c(1.5, -0.5, 1, 1))
+gal80_patch
+# ggsave(gal80_patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_GAL1_GAL10_highlight_typhoon.png"), dpi = 800, width = 5, height = 4.5)
+# ggsave(gal80_patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_GAL1_GAL10_typhoon_new.png"), dpi = 800, width = 14, height = 5.5)
+```
+
+Plot nuc and TF occupancy changes accompanying the typhoon plot above
+
+```{r}
+sub_mut.df <- subset(master.df, Mutant %in% c("GAL80") & Locus %in% c("GAL1", "GAL10"))[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm")]
+
+melt.df <- melt(sub_mut.df)
+
+melt.df$Locus <- factor(melt.df$Locus, levels = c("GAL10", "GAL1"))
+occupancy_bar <- ggplot(melt.df, aes(x = variable, y = value, fill = variable)) + 
+  geom_bar(color = "black", width = 0.5, stat = "identity") + 
+  geom_hline(yintercept = 0, color = "black") + 
+  scale_fill_manual(values = c("Subnuc_Norm" = "#FDB863", "Nuc_Norm" = "#8073AC")) +
+  scale_x_discrete(labels = c("TF \n Occupancy ∆", "Nuc \n Occupancy ∆")) + 
+  facet_wrap(.~Locus) + 
+  theme_classic() + 
+  theme(legend.position = "none", 
+        panel.grid = element_blank(), 
+        plot.title = element_text(hjust = 0.5, face = "bold.italic"),
+        # panel.border = element_blank(),
+        strip.background = element_blank(), 
+        strip.text = element_text(size = 10), 
+        axis.text = element_text(color = "black")) + 
+  labs(x = "", y = "Log2FC") + 
+  coord_flip()
+  
+occupancy_bar
+
+# ggsave(occupancy_bar, filename = "/Users/kmoyung/Desktop/gal80_occupancy.png", dpi = 800, width = 5, height = 3)
+```
+
+Test: Add occupancy changes together with typhoon plot
+
+```{r}
+figure_patch <- geneplot / plot_spacer() / controlplot_highlight / plot_spacer() / sampleplot_highlight / occupancy_bar + 
+  plot_layout(heights = c(1, 0.5, 1, 0.5, 1, 1))
+figure_patch
+
+ggsave(figure_patch, filename = "/Users/kmoyung/Desktop/typhoon_figure.png", dpi = 800, width = 6, height = 7)
+```
+
+## Plot example typhoon plots of upregulated genes
+
+```{r}
+upreg.df <- master.df %>%
+  filter(lnorm_pvals < 0.0001 & Microarray_FC >= 1)
+
+# Iterate through these interactions and plot them
+for (i in 1:nrow(upreg.df)) {
+  tryCatch({
+    mut <- upreg.df$Mutant[i]
+    locus <- upreg.df$Locus[i]
+    
+    coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+    chr <- coords$chrom[1]
+    strand <- coords$strand[1]
+    
+    up_offset <- 800
+    down_offset <- 1000
+    
+    if (strand == "+") {
+      start <- coords$tss[1] - up_offset
+      end <- coords$tss[1] + down_offset
+      prom_start <- coords$tss[1] - 250
+      prom_end <- coords$tss[1]
+    } else {
+      start <- coords$tss[1] - down_offset
+      end <- coords$tss[1] + up_offset
+      prom_start <- coords$tss[1]
+      prom_end <- coords$tss[1] + 250
+    }
+    
+    binding_start <- coords$tss[1] - 200
+    binding_end <- coords$tss[1] + 200
+    
+    geneplot <- plot_genes(locus, chr, start, end)
+    
+    controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+    sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end) 
+    
+    controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5)) +
+      labs(x = "", title = "Control")
+    sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5, face = "italic")) + 
+      labs(title = paste0(tolower(mut),"\u0394"))
+    patch <- geneplot / plot_spacer() / controlplot / sampleplot + plot_layout(heights = c(1.5, -0.5, 1, 1)) 
+    patch
+    ggsave(patch, filename = paste0("/Users/kmoyung/upreg_typhoons/", mut, "_", locus, "_typhoon.png"), dpi = 800, width = 4, height = 3.5)
+  }, error = function(e){})
+}
+```
+
+## Plot example typhoon plots of downregulated genes
+
+```{r}
+downreg.df <- master.df %>%
+  filter(lnorm_pvals < 0.0001 & Microarray_FC <= -1)
+
+# Iterate through these interactions and plot them
+for (i in 1:nrow(downreg.df)) {
+  tryCatch({
+    mut <- downreg.df$Mutant[i]
+    locus <- downreg.df$Locus[i]
+    
+    coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+    chr <- coords$chrom[1]
+    strand <- coords$strand[1]
+    
+    up_offset <- 800
+    down_offset <- 1000
+    
+    if (strand == "+") {
+      start <- coords$tss[1] - up_offset
+      end <- coords$tss[1] + down_offset
+      prom_start <- coords$tss[1] - 250
+      prom_end <- coords$tss[1]
+    } else {
+      start <- coords$tss[1] - down_offset
+      end <- coords$tss[1] + up_offset
+      prom_start <- coords$tss[1]
+      prom_end <- coords$tss[1] + 250
+    }
+    
+    binding_start <- coords$tss[1] - 200
+    binding_end <- coords$tss[1] + 200
+    
+    geneplot <- plot_genes(locus, chr, start, end)
+    
+    controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+    sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end) 
+    
+    controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5)) +
+      labs(x = "", title = "Control")
+    sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5, face = "italic")) + 
+      labs(title = paste0(tolower(mut),"\u0394"))
+    patch <- geneplot / plot_spacer() / controlplot / sampleplot + plot_layout(heights = c(1.5, -0.5, 1, 1)) 
+    patch
+    ggsave(patch, filename = paste0("/Users/kmoyung/downreg_typhoons/", mut, "_", locus, "_typhoon.png"), dpi = 800, width = 4, height = 3.5)
+  }, error = function(e){})
+}
+```
+## Plot typhoon plot at locations of deleted ORFs and +/- 1kb surrounding it
+
+```{r}
+for (mut in c("PHO4")) {
+# for (mut in mutants$V1) {
+  tryCatch({
+    # mut <- "GAL80"
+    locus <- mut
+    
+    coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "left_coord", "right_coord")]
+    chr <- coords$chrom[1]
+    strand <- coords$strand[1]
+    
+    start <- coords$left_coord[1] - 2000
+    end <- coords$right_coord[1] + 2000
+    
+    if (strand == "+") {
+      prom_start <- coords$tss[1] - 250
+      prom_end <- coords$tss[1]
+    } else {
+      prom_start <- coords$tss[1]
+      prom_end <- coords$tss[1] + 250
+    }
+    
+    binding_start <- coords$tss[1] - 200
+    binding_end <- coords$tss[1] + 200
+    
+    # Get all genes in the current window
+    sub_genes <- subset(gene.df, chrom == chr & between(tss, start, end))
+    
+    geneplot <- plot_genes(sub_genes$alias, chr, start, end)
+    nb <- 40
+    
+    controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+    sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end) 
+    
+    # Add "plot" for global y-axis
+    # yaxis <- ggplot(data.frame(l = "Fragment Length", x = 1, y = -1)) +
+    #   geom_text(aes(x, y, label = l), angle = 90, size = 5) + 
+    #   theme_void() +
+    #   coord_cartesian(clip = "off")
+    
+    # controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5)) +
+    #   labs(x = "")
+    sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5))
+    patch <- (geneplot / controlplot / sampleplot) + plot_annotation(title = paste0(tolower(mut),"\u0394"), theme = theme(plot.title = element_text(hjust = 0.5, face = "italic"), 
+          axis.title = element_blank()))
+    patch
+    ggsave(patch, filename = paste0("/Users/kmoyung/kanmx_typhoon/mnase_only/", mut, "_surrounding_typhoon.png"), dpi = 800, width = 5, height = 3)
+  }, error = function(e) {})
+}
+
+
+```
+
+## Plot typhoon plot at locations of deleted ORFs and +/- 1kb surrounding it with available RNA-seq data
+
+```{r}
+
+for (mut in sample_IDs$V1) {
+  tryCatch({
+    # mut <- ""
+    locus <- mut
+    
+    coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "left_coord", "right_coord")]
+    chr <- coords$chrom[1]
+    strand <- coords$strand[1]
+    
+    start <- coords$left_coord[1] - 2000
+    end <- coords$right_coord[1] + 2000
+    
+    ## Load RNA-seq coverage
+    dmr_id <- sample_IDs[sample_IDs$V1 == mut, 2]
+    fwd_mut_coverage <- fread(paste0("/Users/kmoyung/aligned_DMR/pileups/", dmr_id, "_coverage_fwd.txt"), header = F)
+    rev_mut_coverage <- fread(paste0("/Users/kmoyung/aligned_DMR/pileups/", dmr_id, "_coverage_rev.txt"), header = F)
+    
+    # Read-in control RNA-seq data
+    fwd_mut_control_coverage <- fread(paste0("/Users/kmoyung/aligned_DMR/pileups/mutant_control_coverage_fwd.txt"), header = F)
+    rev_mut_control_coverage <- fread(paste0("/Users/kmoyung/aligned_DMR/pileups/mutant_control_coverage_rev.txt"), header = F)
+    
+    # Divide counts by total read count to account for library size
+    fwd_mut_coverage$Norm_Count <- fwd_mut_coverage$V3 / sum(fwd_mut_coverage$V3)
+    rev_mut_coverage$Norm_Count <- rev_mut_coverage$V3 / sum(rev_mut_coverage$V3)
+    
+    fwd_mut_control_coverage$Norm_Count <- fwd_mut_control_coverage$V3 / sum(fwd_mut_control_coverage$V3)
+    rev_mut_control_coverage$Norm_Count <- rev_mut_control_coverage$V3 / sum(rev_mut_control_coverage$V3)
+    
+    if (strand == "+") {
+      prom_start <- coords$tss[1] - 250
+      prom_end <- coords$tss[1]
+    } else {
+      prom_start <- coords$tss[1]
+      prom_end <- coords$tss[1] + 250
+    }
+    
+    binding_start <- coords$tss[1] - 200
+    binding_end <- coords$tss[1] + 200
+    
+    # Get all genes in the current window
+    sub_genes <- subset(gene.df, chrom == chr & between(tss, start, end))
+    
+    geneplot <- plot_genes(sub_genes$alias, chr, start, end)
+    nb <- 40
+    
+    controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+    sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end) 
+    
+    # Subset coverage and merge
+    fwd_mut_coverage <- subset(fwd_mut_coverage, V1 == chr & between(V2, start, end))
+    rev_mut_coverage <- subset(rev_mut_coverage, V1 == chr & between(V2, start, end))
+    fwd_mut_coverage$Strand <- "+"
+    rev_mut_coverage$Strand <- "-"
+    fwd_mut_coverage$Norm_Count <- -fwd_mut_coverage$Norm_Count
+    mut_coverage <- rbind(fwd_mut_coverage, rev_mut_coverage)
+    mut_coverage$Sample <- mut
+    
+    fwd_mut_control_coverage <- subset(fwd_mut_control_coverage, V1 == chr & between(V2, start, end))
+    rev_mut_control_coverage <- subset(rev_mut_control_coverage, V1 == chr & between(V2, start, end))
+    fwd_mut_control_coverage$Strand <- "+"
+    rev_mut_control_coverage$Strand <- "-"
+    fwd_mut_control_coverage$Norm_Count <- -fwd_mut_control_coverage$Norm_Count
+    control_coverage <- rbind(fwd_mut_control_coverage, rev_mut_control_coverage)
+    control_coverage$Sample <- "Control"
+    
+    rna_coverage <- rbind(mut_coverage, control_coverage)
+    colnames(rna_coverage)[1:3] <- c("Chr", "Pos", "Count")
+    
+    control_coverageplot <- ggplot(subset(rna_coverage, Sample == "Control"), aes(x = Pos, y = Norm_Count, color = Strand)) + 
+      geom_line(alpha = 1) + 
+      theme_bw() + 
+      theme(legend.position = "none",
+            panel.grid = element_blank(),
+            axis.text.x = element_blank()) + 
+      labs(y = "Norm. Coverage", title = "Control") + 
+      coord_cartesian(expand = c(0,0), ylim = c(-2e-6, 2e-6))
+    
+    coverageplot <- ggplot(subset(rna_coverage, Sample == mut), aes(x = Pos, y = Norm_Count, color = Strand)) + 
+      geom_line(alpha = 1) + 
+      theme_bw() + 
+      theme(legend.position = "none", 
+            panel.grid = element_blank(),
+            axis.text.x = element_blank()) +
+      labs(y = "Norm. Coverage", title = "Mutant") +
+      coord_cartesian(expand = c(0,0), ylim = c(-2e-6, 2e-6))
+    
+    sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5))
+    patch <- (geneplot / control_coverageplot / controlplot / coverageplot / sampleplot) + plot_annotation(title = paste0(tolower(mut),"\u0394"), theme = theme(plot.title = element_text(hjust = 0.5, face = "italic"), 
+          axis.title = element_blank()))
+    patch
+    ggsave(patch, filename = paste0("/Users/kmoyung/kanmx_typhoon/", mut, "_surrounding_typhoon.png"), dpi = 800, width = 4, height = 6)
+  }, error=function(e){})
+  
+}
+
+
+```
+
+## Plot typhoon plots around centromeres
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+muts <- subset(master.df, lnorm_pvals < 0.0001 & abs(Microarray_FC) < 0.5 & Locus == "RRP6")$Mutant
+
+for (mut in muts) {
+  for (locus in centromeres$alias) {
+    coords <- centromeres[centromeres$alias == locus, c("alias", "chrom", "start", "end")]
+    chr <- coords$chrom[1]
+    
+    up_offset <- 1000
+    down_offset <- 1000
+    
+    start <- coords$start - up_offset
+    end <- coords$end + down_offset
+    
+    prom_start <- coords$start
+    prom_end <- coords$end
+    
+    controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+    sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end) 
+    
+    sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5))
+    patch <- (plot_spacer() / controlplot / sampleplot) + plot_annotation(title = paste0(tolower(mut),"\u0394 at ", locus), theme = theme(plot.title = element_text(hjust = 0.5, face = "italic"), 
+          axis.title = element_blank()))
+    patch
+    ggsave(patch, filename = paste0("/Users/kmoyung/centromere_typhoons/", mut, "_", locus, "_typhoon.png"), dpi = 800, width = 4, height = 3)
+  }
+}
+```
+
+## Plot typhoon plot of one mutant annotated with fragile nucleosome positions
+
+```{r}
+mut <- "AZF1"
+locus <- "NCE102"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+# up_offset <- 300
+# down_offset <- 800
+up_offset <- 1000
+down_offset <- 1000
+
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$tss[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+} else {
+  start <- coords$tss[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+}
+
+binding_start <- coords$tss[1] - 200
+binding_end <- coords$tss[1] + 200
+
+geneplot <- plot_genes(locus, start, end)
+nb <- 40
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end) 
+
+# Annotate with fragile nucleosome positioning
+controlplot <- controlplot + 
+  geom_vline(data = subset(fragile_nuc.df, chr == chr), aes(xintercept = dyad), alpha = 0.5)
+sampleplot <- sampleplot + 
+  geom_vline(data = subset(fragile_nuc.df, chr == chr), aes(xintercept = dyad), alpha = 0.5)
+
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5))
+patch <- (geneplot / controlplot / sampleplot) + plot_annotation(title = paste0(tolower(mut),"\u0394"), theme = theme(plot.title = element_text(hjust = 0.5, face = "italic"), 
+      axis.title = element_blank()))
+patch
+ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_", locus, "_typhoon_fragile_pos.png"), dpi = 800, width = 4, height = 3)
+```
+
+## Plot typhoon plot with Park coordinates and SGD annotations
+
+```{r}
+mut <- "ARG81"
+locus <- "PPM2"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "pas", "txStart", "txEnd")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+# up_offset <- 300
+# down_offset <- 800
+# up_offset <- 1000
+# down_offset <- 1000
+# up_offset <- 2000
+# down_offset <- 2000
+# 
+# if (strand == "+") {
+#   start <- coords$tss[1] - up_offset
+#   end <- coords$tss[1] + down_offset
+#   prom_start <- coords$tss[1] - 250
+#   prom_end <- coords$tss[1]
+# } else {
+#   start <- coords$tss[1] - down_offset
+#   end <- coords$tss[1] + up_offset
+#   prom_start <- coords$tss[1]
+#   prom_end <- coords$tss[1] + 250
+# }
+
+# Use below to plot entire gene body
+up_offset <- 800
+down_offset <- 800
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$pas[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+  gene_start <- coords$txStart[1]
+  gene_end <- coords$txEnd[1]
+  park_tss <- coords$tss[1]
+  park_pas <- coords$pas[1]
+} else {
+  start <- coords$pas[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+  gene_start <- coords$txEnd[1]
+  gene_end <- coords$txStart[1]
+  park_tss <- coords$tss[1]
+  park_pas <- coords$pas[1]
+}
+
+binding_start <- coords$tss[1] - 200
+binding_end <- coords$tss[1] + 200
+
+geneplot <- plot_genes(locus, chr, start, end)
+nb <- 40
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end) 
+
+# Add dotted lines to represent Park TSS/PAS and SGD start/end
+controlplot <- controlplot + 
+  geomtextpath::geom_textvline(label = "SGD Start", xintercept = gene_start, color = "red", alpha = 0.5, size = 2) + 
+  geomtextpath::geom_textvline(label = "SGD End", xintercept = gene_end, color = "red", alpha = 0.5, size = 2) + 
+  geomtextpath::geom_textvline(label = "Park TSS", xintercept = park_tss, color = "black", alpha = 0.5, size = 2) + 
+  geomtextpath::geom_textvline(label = "Park PAS", xintercept = park_pas, color = "black", alpha = 0.5, size = 2)
+
+sampleplot <- sampleplot + 
+  geomtextpath::geom_textvline(label = "SGD Start", xintercept = gene_start, color = "red", alpha = 0.5, size = 2) + 
+  geomtextpath::geom_textvline(label = "SGD End", xintercept = gene_end, color = "red", alpha = 0.5, size = 2) + 
+  geomtextpath::geom_textvline(label = "Park TSS", xintercept = park_tss, color = "black", alpha = 0.5, size = 2) + 
+  geomtextpath::geom_textvline(label = "Park PAS", xintercept = park_pas, color = "black", alpha = 0.5, size = 2)
+
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5))
+patch <- (geneplot / controlplot / sampleplot) + plot_annotation(title = paste0(tolower(mut),"\u0394"), theme = theme(plot.title = element_text(hjust = 0.5, face = "italic"), 
+      axis.title = element_blank()))
+patch
+ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_", locus, "_typhoon.png"), dpi = 800, width = 4, height = 3)
+```
+
+## Plot typhoon plot highlighting intergenic region of tandem genes
+
+```{r}
+mut <- "ARG81"
+locus <- "PPM2"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "pas", "txStart", "txEnd")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+# up_offset <- 300
+# down_offset <- 800
+# up_offset <- 1000
+# down_offset <- 1000
+# up_offset <- 2000
+# down_offset <- 2000
+# 
+# if (strand == "+") {
+#   start <- coords$tss[1] - up_offset
+#   end <- coords$tss[1] + down_offset
+#   prom_start <- coords$tss[1] - 250
+#   prom_end <- coords$tss[1]
+# } else {
+#   start <- coords$tss[1] - down_offset
+#   end <- coords$tss[1] + up_offset
+#   prom_start <- coords$tss[1]
+#   prom_end <- coords$tss[1] + 250
+# }
+
+# Use below to plot entire gene body
+up_offset <- 800
+down_offset <- 800
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$pas[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+  gene_start <- coords$txStart[1]
+  gene_end <- coords$txEnd[1]
+  park_tss <- coords$tss[1]
+  park_pas <- coords$pas[1]
+} else {
+  start <- coords$pas[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+  gene_start <- coords$txEnd[1]
+  gene_end <- coords$txStart[1]
+  park_tss <- coords$tss[1]
+  park_pas <- coords$pas[1]
+}
+
+binding_start <- coords$tss[1] - 200
+binding_end <- coords$tss[1] + 200
+
+geneplot <- plot_genes(locus, chr, start, end)
+nb <- 40
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end) 
+
+# Add dotted lines to represent Park TSS/PAS and SGD start/end
+controlplot <- controlplot + 
+  geomtextpath::geom_textvline(label = "SGD Start", xintercept = gene_start, color = "red", alpha = 0.5, size = 2) + 
+  geomtextpath::geom_textvline(label = "SGD End", xintercept = gene_end, color = "red", alpha = 0.5, size = 2) + 
+  geomtextpath::geom_textvline(label = "Park TSS", xintercept = park_tss, color = "black", alpha = 0.5, size = 2) + 
+  geomtextpath::geom_textvline(label = "Park PAS", xintercept = park_pas, color = "black", alpha = 0.5, size = 2)
+
+sampleplot <- sampleplot + 
+  geomtextpath::geom_textvline(label = "SGD Start", xintercept = gene_start, color = "red", alpha = 0.5, size = 2) + 
+  geomtextpath::geom_textvline(label = "SGD End", xintercept = gene_end, color = "red", alpha = 0.5, size = 2) + 
+  geomtextpath::geom_textvline(label = "Park TSS", xintercept = park_tss, color = "black", alpha = 0.5, size = 2) + 
+  geomtextpath::geom_textvline(label = "Park PAS", xintercept = park_pas, color = "black", alpha = 0.5, size = 2)
+
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5))
+patch <- (geneplot / controlplot / sampleplot) + plot_annotation(title = paste0(tolower(mut),"\u0394"), theme = theme(plot.title = element_text(hjust = 0.5, face = "italic"), 
+      axis.title = element_blank()))
+patch
+ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_", locus, "_typhoon.png"), dpi = 800, width = 4, height = 3)
+```
+
+## TODO: Plot typhoon plot of converging gene ends
+
+```{r}
+mut <- "ROX1"
+locus <- "HEM13"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "pas", "txStart", "txEnd")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+# up_offset <- 300
+# down_offset <- 800
+# up_offset <- 1000
+# down_offset <- 1000
+# up_offset <- 2000
+# down_offset <- 2000
+# 
+# if (strand == "+") {
+#   start <- coords$tss[1] - up_offset
+#   end <- coords$tss[1] + down_offset
+#   prom_start <- coords$tss[1] - 250
+#   prom_end <- coords$tss[1]
+# } else {
+#   start <- coords$tss[1] - down_offset
+#   end <- coords$tss[1] + up_offset
+#   prom_start <- coords$tss[1]
+#   prom_end <- coords$tss[1] + 250
+# }
+
+# Use below to plot entire gene body
+up_offset <- 2500
+down_offset <- 2500
+
+if (strand == "+") {
+  start <- coords$pas[1] - up_offset
+  end <- coords$pas[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+} else {
+  start <- coords$pas[1] - down_offset
+  end <- coords$pas[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+}
+
+binding_start <- coords$tss[1] - 200
+binding_end <- coords$tss[1] + 200
+
+geneplot <- plot_genes(locus, chr, start, end)
+nb <- 40
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end) 
+
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5))
+patch <- (geneplot / controlplot / sampleplot) + plot_annotation(title = paste0(tolower(mut),"\u0394"), theme = theme(plot.title = element_text(hjust = 0.5, face = "italic"), 
+      axis.title = element_blank()))
+patch
+ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_", locus, "_typhoon_converging.png"), dpi = 800, width = 4, height = 3)
+```
+
+## TODO: Plot typhoon plot with RNA-seq coverage
+
+```{r}
+mut <- "HAP2"
+locus <- "ENB1"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand", "pas", "txStart", "txEnd")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+## Load RNA-seq coverage
+dmr_id <- sample_IDs[sample_IDs$V1 == mut, 2]
+fwd_mut_coverage <- fread(paste0("/Users/kmoyung/aligned_DMR/pileups/", dmr_id, "_coverage_fwd.txt"), header = F)
+rev_mut_coverage <- fread(paste0("/Users/kmoyung/aligned_DMR/pileups/", dmr_id, "_coverage_rev.txt"), header = F)
+
+# fwd_control_coverage <- fread(paste0("/Users/kmoyung/aligned_DMR/pileups/cadmium_control_coverage_fwd.txt"), header = F)
+# rev_control_coverage <- fread(paste0("/Users/kmoyung/aligned_DMR/pileups/cadmium_control_coverage_rev.txt"), header = F)
+
+fwd_mut_control_coverage <- fread(paste0("/Users/kmoyung/aligned_DMR/pileups/mutant_control_coverage_fwd.txt"), header = F)
+rev_mut_control_coverage <- fread(paste0("/Users/kmoyung/aligned_DMR/pileups/mutant_control_coverage_rev.txt"), header = F)
+
+# Divide counts by total read count to account for library size
+fwd_mut_coverage$Norm_Count <- fwd_mut_coverage$V3 / sum(fwd_mut_coverage$V3)
+rev_mut_coverage$Norm_Count <- rev_mut_coverage$V3 / sum(rev_mut_coverage$V3)
+
+fwd_mut_control_coverage$Norm_Count <- fwd_mut_control_coverage$V3 / sum(fwd_mut_control_coverage$V3)
+rev_mut_control_coverage$Norm_Count <- rev_mut_control_coverage$V3 / sum(rev_mut_control_coverage$V3)
+
+# up_offset <- 300
+# down_offset <- 800
+# up_offset <- 1000
+# down_offset <- 1000
+up_offset <- 2000
+down_offset <- 2000
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$tss[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+} else {
+  start <- coords$tss[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+}
+
+# Use below to plot entire gene body
+# up_offset <- 800
+# down_offset <- 800
+# 
+# if (strand == "+") {
+#   start <- coords$tss[1] - up_offset
+#   end <- coords$pas[1] + down_offset
+#   prom_start <- coords$tss[1] - 250
+#   prom_end <- coords$tss[1]
+#   gene_start <- coords$txStart[1]
+#   gene_end <- coords$txEnd[1]
+#   park_tss <- coords$tss[1]
+#   park_pas <- coords$pas[1]
+# } else {
+#   start <- coords$pas[1] - down_offset
+#   end <- coords$tss[1] + up_offset
+#   prom_start <- coords$tss[1]
+#   prom_end <- coords$tss[1] + 250
+#   gene_start <- coords$txEnd[1]
+#   gene_end <- coords$txStart[1]
+#   park_tss <- coords$tss[1]
+#   park_pas <- coords$pas[1]
+# }
+
+# Subset coverage and merge
+fwd_mut_coverage <- subset(fwd_mut_coverage, V1 == chr & between(V2, start, end))
+rev_mut_coverage <- subset(rev_mut_coverage, V1 == chr & between(V2, start, end))
+fwd_mut_coverage$Strand <- "+"
+rev_mut_coverage$Strand <- "-"
+fwd_mut_coverage$Norm_Count <- -fwd_mut_coverage$Norm_Count
+mut_coverage <- rbind(fwd_mut_coverage, rev_mut_coverage)
+mut_coverage$Sample <- mut
+
+fwd_mut_control_coverage <- subset(fwd_mut_control_coverage, V1 == chr & between(V2, start, end))
+rev_mut_control_coverage <- subset(rev_mut_control_coverage, V1 == chr & between(V2, start, end))
+fwd_mut_control_coverage$Strand <- "+"
+rev_mut_control_coverage$Strand <- "-"
+fwd_mut_control_coverage$Norm_Count <- -fwd_mut_control_coverage$Norm_Count
+control_coverage <- rbind(fwd_mut_control_coverage, rev_mut_control_coverage)
+control_coverage$Sample <- "Control"
+
+# fwd_control_coverage <- subset(fwd_control_coverage, V1 == chr & between(V2, start, end))
+# rev_control_coverage <- subset(rev_control_coverage, V1 == chr & between(V2, start, end))
+# fwd_control_coverage$Strand <- "+"
+# rev_control_coverage$Strand <- "-"
+# fwd_control_coverage$Norm_Count <- -fwd_control_coverage$Norm_Count
+# control_coverage <- rbind(fwd_control_coverage, rev_control_coverage)
+# control_coverage$Sample <- "Control"
+
+rna_coverage <- rbind(mut_coverage, control_coverage)
+colnames(rna_coverage)[1:3] <- c("Chr", "Pos", "Count")
+
+control_coverageplot <- ggplot(subset(rna_coverage, Sample == "Control"), aes(x = Pos, y = Norm_Count, color = Strand)) + 
+  geom_line(alpha = 1) + 
+  theme_bw() + 
+  theme(legend.position = "none",
+        panel.grid = element_blank(),
+        axis.text.x = element_blank()) + 
+  labs(y = "Norm. Coverage", title = "Control") + 
+  coord_cartesian(expand = c(0,0), ylim = c(-2e-6, 2e-6))
+
+coverageplot <- ggplot(subset(rna_coverage, Sample == mut), aes(x = Pos, y = Norm_Count, color = Strand)) + 
+  geom_line(alpha = 1) + 
+  theme_bw() + 
+  theme(legend.position = "none", 
+        panel.grid = element_blank(),
+        axis.text.x = element_blank()) +
+  labs(y = "Norm. Coverage", title = "Mutant") +
+  coord_cartesian(expand = c(0,0), ylim = c(-2e-6, 2e-6))
+
+binding_start <- coords$tss[1] - 200
+binding_end <- coords$tss[1] + 200
+
+geneplot <- plot_genes(locus, chr, start, end)
+nb <- 40
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end) 
+
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5))
+patch <- (geneplot / control_coverageplot / controlplot / coverageplot / sampleplot) + plot_annotation(title = paste0(tolower(mut),"\u0394"), theme = theme(plot.title = element_text(hjust = 0.5, face = "italic"), 
+      axis.title = element_blank()))
+patch
+ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_", locus, "_typhoon_rna_norm.png"), dpi = 800, width = 4, height = 6)
+```
+

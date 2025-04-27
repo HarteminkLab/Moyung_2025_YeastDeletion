@@ -1,0 +1,556 @@
+---
+title: "Plot chromatin + expression changes across genes with enriched pathways"
+output: html_notebook
+---
+
+## Load packages
+
+```{r}
+library(clusterProfiler)
+library(enrichplot)
+library(pathview)
+library(org.Sc.sgd.db)
+library(GOSemSim)
+
+sacCer <- org.Sc.sgd.db
+gene_to_ORF.df <- as.data.frame(org.Sc.sgdCOMMON2ORF)
+gene_to_uniprot.df <- as.data.frame(org.Sc.sgdUNIPROT)
+gene_to_go.df <- as.data.frame(org.Sc.sgdGO2ORF)
+gene_map.df <- merge(gene_to_ORF.df, gene_to_uniprot.df)
+scGO <- godata('org.Sc.sgd.db', ont = "BP")
+```
+
+## Select significant chromatin
+
+```{r}
+e <- 0.5
+# Label points based on the laplacian cutoff
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC >= e ~ "Up + Chrom",
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC <= -e ~ "Down + Chrom", 
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & between(Microarray_FC, -e, e) ~ "Chrom", 
+    TRUE ~ "Other"
+  ))
+
+# Filter out mutants with no significant expression+chromatin changes; we call these "unresponsive" mutants
+sub_master.df <- master.df %>%
+  group_by(Mutant) %>%
+  filter(!all(Point_Label %in% c("Other", "Chrom")))
+
+sig_chrom.df <- sub_master.df %>%
+  group_by(Mutant) %>%
+  filter(Point_Label %in% c("Up + Chrom", "Down + Chrom", "Chrom"))
+```
+
+Perform GO enrichment for each mutant as its own group
+
+```{r}
+# Get background of genes from dataset
+background_genes <- unique(master.df$Locus)
+
+# Use compareCluster to compare different mutants
+groups <- list()
+for (mut in unique(sig_chrom.df$Mutant)) {
+  sub.df <- subset(sig_chrom.df, Mutant == mut)
+  if (nrow(sub.df) > 0) {
+    groups[[paste0(tolower(mut), "\u0394")]] <- unique(sub.df$Locus)
+  }
+}
+
+result <- compareCluster(groups, fun = "enrichGO", OrgDb = sacCer, pvalueCutoff = 0.05, qvalueCutoff = 0.5, ont = "BP", keyType = "GENENAME", pAdjustMethod = "BH", universe = background_genes)
+
+simp_result <- simplify(result, cutoff = 0.7, by = "Description")
+```
+
+## WikiPathways enrichment
+
+```{r}
+# Get list of significant genes
+sig_genes <- unique(sig_chrom.df$Locus)
+sig_entrez <- bitr(sig_genes, fromType = "GENENAME", toType = "ENTREZID", OrgDb = sacCer)$ENTREZID
+
+# Get background of genes from dataset
+background_genes <- unique(master.df$Locus)
+background_entrez <- bitr(background_genes, fromType = "GENENAME", toType = "ENTREZID", OrgDb = sacCer)$ENTREZID
+
+wp_result <- enrichWP(sig_entrez, organism = "Saccharomyces cerevisiae")
+# readable_wp_result <- setReadable(wp_result, OrgDb = sacCer, keyType = "GENENAME")
+```
+
+
+## Select enriched terms and plot chromatin features + expression changes
+
+```{r}
+# mut <- "AFT1"
+# loci <- c("FET3", "SIT1", "MRS4")
+# term <- "Iron ion transport"
+
+mut <- "LYS14"
+loci <- c("LYS1", "LYS12", "LYS4", "LYS9")
+term <- "Lysine biosynthetic process"
+
+# mut <- "GAL80"
+# loci <- c("GAL1", "GAL10", "GAL2")
+# term <- "Galactose metabolism"
+
+# mut <- "BAS1"
+# loci <- c("GCV1", "GCV2", "GCV3", "HIS1", "HIS4", "HIS5", "SHM2")
+# term <- "Amino acid metabolism"
+
+# mut <- "BAS1"
+# loci <- c("ADE12", "ADE17", "HPT1")
+# term <- "Purine metabolism"
+
+# mut <- "PAF1"
+# loci <- c("ARG1", "ARG3", "CIT2", "SER3", "SNZ1")
+# term <- "Carboxylic acid metabolic process"
+
+# mut <- "URE2"
+# loci <- c("DAL1", "DAL3", "DUR1,2", "GDH2", "PUT1")
+# term <- "Organonitrogen compound catabolic process"
+
+# mut <- c("ARG80")
+# loci <- c("ARG1", "ARG8", "ARG81")
+# term <- "Arginine metabolic process"
+
+cur.df <- subset(master.df, Mutant %in% mut & Locus %in% loci)
+cur_melt.df <- melt(cur.df[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif")])
+
+# Order locus by expression fold change
+cur.df <- cur.df %>%
+  arrange(Microarray_FC)
+cur_melt.df$Locus <- factor(cur_melt.df$Locus, levels = cur.df$Locus)
+
+# Order variables
+cur_melt.df$variable <- factor(cur_melt.df$variable, levels = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"))
+
+colscale <- c("#264b96", "#bf212f")
+heat <- ggplot(subset(cur_melt.df, variable != "hasMotif"), aes(x = Locus, y = variable, fill = value)) + 
+  geom_tile(color = "black", lwd = 1) + 
+  scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-0.75, 0.75), oob = scales::squish) + 
+  theme_bw() + 
+  scale_y_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"), labels = c("TF Occupancy \u0394", "Nuc Occupancy \u0394", "Expression", "Motif"), limits=rev) + 
+  labs(x = "", fill = "Log2 Fold Change", y = "", title = term, subtitle = paste0(tolower(mut), "\u0394")) + 
+  ggnewscale::new_scale_fill() +
+  geom_point(data = subset(cur_melt.df, variable == "hasMotif"), shape = 18, size = 5, aes(color = value)) +
+  scale_color_gradient(low = "white", high = "black", limits = c(0, 1)) + 
+  theme(panel.grid = element_blank(), 
+              panel.border = element_blank(), 
+              panel.background = element_blank(), 
+              axis.ticks = element_blank(), 
+              axis.text = element_text(color = "black"), 
+              axis.text.x = element_text(angle = 45, hjust = 1),
+              strip.background = element_blank(), 
+              strip.text = element_text(color = "black", face = "bold.italic"),
+              legend.position = "bottom", 
+              # plot.title = element_text(hjust = 0.5, face = "bold", size = 8), 
+              plot.title = element_blank(), 
+              plot.subtitle = element_text(hjust = 0.5, face = "bold.italic")) + 
+  guides(color = "none") + 
+  coord_equal(clip = "off")
+  # facet_grid(.~Mutant, scales = "free")
+
+heat
+ggsave(heat, filename = paste0("/Users/kmoyung/Desktop/", term,".png"), dpi = 800, width = 4, height = 3)
+```
+
+## Plot sulfur metabolism in cbf1∆ and met28∆
+
+```{r}
+mut <- c("CBF1")
+loci <- c("MET3", "MET14", "MET16", "MET10", "MET5", "MET17")
+term <- "Sulfur metabolism"
+
+cur.df <- subset(master.df, Mutant %in% mut & Locus %in% loci)
+cur_melt.df <- melt(cur.df[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif")])
+
+# Format mutant labels
+cur_melt.df$Mutant <- paste0(tolower(cur_melt.df$Mutant), "∆")
+
+# Order locus by expression fold change
+cur_melt.df$Locus <- factor(cur_melt.df$Locus, levels = loci)
+
+colscale <- c("#264b96", "#bf212f")
+cbf1_heat <- ggplot(subset(cur_melt.df, variable != "hasMotif"), aes(x = Locus, y = variable, fill = value)) + 
+  geom_tile(color = "black", lwd = 0.5) + 
+  scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-0.75, 0.75), oob = scales::squish) + 
+  theme_bw() + 
+  scale_y_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"), labels = c("TF Occupancy \u0394", "Nuc Occupancy \u0394", "Expression", "Motif")) + 
+  labs(x = "", fill = "Log2 Fold Change", y = "", title = term) + 
+  ggnewscale::new_scale_fill() +
+  geom_point(data = subset(cur_melt.df, variable == "hasMotif"), shape = 17, size = 5, aes(color = value)) +
+  scale_color_gradient(low = "white", high = "black", limits = c(0, 1)) + 
+  theme(panel.grid = element_blank(), 
+              panel.border = element_blank(), 
+              panel.background = element_blank(), 
+              axis.ticks = element_blank(), 
+              axis.text = element_text(color = "black"), 
+              axis.text.x = element_text(angle = 45, hjust = 1),
+              strip.background = element_blank(), 
+              strip.text = element_text(color = "black", face = "italic", size = 12),
+              legend.position = "bottom", 
+              plot.title = element_text(face = "bold", hjust = 0.5)) + 
+  guides(color = "none") + 
+  coord_equal(clip = "off") + 
+  facet_grid(.~Mutant)
+
+cbf1_heat
+# ggsave(heat, filename = paste0("/Users/kmoyung/Desktop/", term,".png"), dpi = 800, width = 4, height = 3)
+```
+
+## Plot glycine cleavage for bas1∆
+
+```{r}
+mut <- c("BAS1")
+loci <- c("GCV1", "GCV2", "GCV3")
+term <- "Glycine cleavage"
+
+cur.df <- subset(master.df, Mutant %in% mut & Locus %in% loci)
+cur_melt.df <- melt(cur.df[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif")])
+
+# Format mutant labels
+cur_melt.df$Mutant <- paste0(tolower(cur_melt.df$Mutant), "∆")
+
+# Order locus by expression fold change
+cur_melt.df$Locus <- factor(cur_melt.df$Locus, levels = loci)
+
+colscale <- c("#264b96", "#bf212f")
+bas1_heat <- ggplot(subset(cur_melt.df, variable != "hasMotif"), aes(x = Locus, y = variable, fill = value)) + 
+  geom_tile(color = "black", lwd = 0.5) + 
+  scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-0.75, 0.75), oob = scales::squish) + 
+  theme_bw() + 
+  scale_y_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"), labels = c("TF Occupancy \u0394", "Nuc Occupancy \u0394", "Expression", "Motif")) + 
+  labs(x = "", fill = "Log2 Fold Change", y = "", title = term) + 
+  ggnewscale::new_scale_fill() +
+  geom_point(data = subset(cur_melt.df, variable == "hasMotif"), shape = 17, size = 5, aes(color = value)) +
+  scale_color_gradient(low = "white", high = "black", limits = c(0, 1)) + 
+  theme(panel.grid = element_blank(), 
+              panel.border = element_blank(), 
+              panel.background = element_blank(), 
+              axis.ticks = element_blank(), 
+              axis.text = element_text(color = "black"), 
+              axis.text.x = element_text(angle = 45, hjust = 1),
+              strip.background = element_blank(), 
+              strip.text = element_text(color = "black", face = "bold.italic", size = 12),
+              legend.position = "bottom", 
+              plot.title = element_blank()) + 
+  guides(color = "none") + 
+  coord_equal(clip = "off") + 
+  facet_grid(.~Mutant)
+
+bas1_heat
+# ggsave(heat, filename = paste0("/Users/kmoyung/Desktop/", term,".png"), dpi = 800, width = 4, height = 3)
+```
+
+## Plot phosphate metabolism
+
+```{r}
+mut <- c("PHO85")
+loci <- c("PHO8", "PHO81", "PHO87", "PHO89")
+term <- "Phosphate metabolism"
+
+cur.df <- subset(master.df, Mutant %in% mut & Locus %in% loci)
+cur_melt.df <- melt(cur.df[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif")])
+
+# Format mutant labels
+cur_melt.df$Mutant <- paste0(tolower(cur_melt.df$Mutant), "∆")
+
+# Order locus by expression fold change
+cur_melt.df$Locus <- factor(cur_melt.df$Locus, levels = loci)
+
+colscale <- c("#264b96", "#bf212f")
+pho85_heat <- ggplot(subset(cur_melt.df, variable != "hasMotif"), aes(x = Locus, y = variable, fill = value)) + 
+  geom_tile(color = "black", lwd = 0.5) + 
+  scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-0.75, 0.75), oob = scales::squish) + 
+  theme_bw() + 
+  scale_y_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"), labels = c("TF Occupancy \u0394", "Nuc Occupancy \u0394", "Expression", "Motif")) + 
+  labs(x = "", fill = "Log2 Fold Change", y = "", title = term) + 
+  ggnewscale::new_scale_fill() +
+  geom_point(data = subset(cur_melt.df, variable == "hasMotif"), shape = 17, size = 5, aes(color = value)) +
+  scale_color_gradient(low = "white", high = "black", limits = c(0, 1)) + 
+  theme(panel.grid = element_blank(), 
+              panel.border = element_blank(), 
+              panel.background = element_blank(), 
+              axis.ticks = element_blank(), 
+              axis.text = element_text(color = "black"), 
+              axis.text.x = element_text(angle = 45, hjust = 1),
+              strip.background = element_blank(), 
+              strip.text = element_text(color = "black", face = "italic", size = 12),
+              legend.position = "bottom", 
+              plot.title = element_text(face = "bold", hjust = 0.5)) + 
+  guides(color = "none") + 
+  coord_equal(clip = "off") + 
+  facet_grid(.~Mutant)
+
+pho85_heat
+# ggsave(heat, filename = paste0("/Users/kmoyung/Desktop/", term,".png"), dpi = 800, width = 4, height = 3)
+```
+
+## Plot histidine biosynthesis
+
+```{r}
+mut <- c("BAS1")
+loci <- c("HIS1", "HIS4", "HIS6", "HIS7", "HIS3", "HIS5", "HIS2")
+term <- "Histidine biosynthesis"
+
+cur.df <- subset(master.df, Mutant %in% mut & Locus %in% loci)
+cur_melt.df <- melt(cur.df[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif")])
+
+# Format mutant labels
+cur_melt.df$Mutant <- paste0(tolower(cur_melt.df$Mutant), "∆")
+
+# Order locus by expression fold change
+cur_melt.df$Locus <- factor(cur_melt.df$Locus, levels = loci)
+
+colscale <- c("#264b96", "#bf212f")
+bas1_his_heat <- ggplot(subset(cur_melt.df, variable != "hasMotif"), aes(x = Locus, y = variable, fill = value)) + 
+  geom_tile(color = "black", lwd = 0.5) + 
+  scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-0.75, 0.75), oob = scales::squish) + 
+  theme_bw() + 
+  scale_y_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"), labels = c("TF Occupancy \u0394", "Nuc Occupancy \u0394", "Expression", "Motif")) + 
+  labs(x = "", fill = "Log2 Fold Change", y = "", title = term) + 
+  ggnewscale::new_scale_fill() +
+  geom_point(data = subset(cur_melt.df, variable == "hasMotif"), shape = 17, size = 5, aes(color = value)) +
+  scale_color_gradient(low = "white", high = "black", limits = c(0, 1)) + 
+  theme(panel.grid = element_blank(), 
+              panel.border = element_blank(), 
+              panel.background = element_blank(), 
+              axis.ticks = element_blank(), 
+              axis.text = element_text(color = "black"), 
+              axis.text.x = element_text(angle = 45, hjust = 1),
+              strip.background = element_blank(), 
+              strip.text = element_text(color = "black", face = "bold.italic", size = 12),
+              legend.position = "bottom", 
+              plot.title = element_blank()) + 
+  guides(color = "none") + 
+  coord_equal(clip = "off") + 
+  facet_grid(.~Mutant)
+
+bas1_his_heat
+# ggsave(heat, filename = paste0("/Users/kmoyung/Desktop/", term,".png"), dpi = 800, width = 4, height = 3)
+```
+
+## Plot arginine biosynthesis
+
+```{r}
+mut <- c("ARG80", "ARG81")
+loci <- c("ARG2", "ARG5,6", "ARG8", "ARG7", "ARG3", "ARG1", "ARG4")
+term <- "Arginine biosynthesis"
+
+# cur.df <- subset(master.df, Mutant %in% mut & Locus %in% loci)
+cur.df <- subset(sig_chrom.df, Mutant %in% mut & Locus %in% loci)
+cur_melt.df <- melt(cur.df[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif")])
+
+# Format mutant labels
+cur_melt.df$Mutant <- paste0(tolower(cur_melt.df$Mutant), "∆")
+
+# Order locus by expression fold change
+cur_melt.df$Locus <- factor(cur_melt.df$Locus, levels = loci)
+
+colscale <- c("#264b96", "#bf212f")
+arg_heat <- ggplot(subset(cur_melt.df, variable != "hasMotif"), aes(x = Locus, y = variable, fill = value)) + 
+  geom_tile(color = "black", lwd = 0.5) + 
+  scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-0.75, 0.75), oob = scales::squish) + 
+  theme_bw() + 
+  scale_y_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"), labels = c("TF Occupancy \u0394", "Nuc Occupancy \u0394", "Expression", "Motif")) + 
+  labs(x = "", fill = "Log2 Fold Change", y = "", title = term) + 
+  ggnewscale::new_scale_fill() +
+  geom_point(data = subset(cur_melt.df, variable == "hasMotif"), shape = 17, size = 5, aes(color = value)) +
+  scale_color_gradient(low = "white", high = "black", limits = c(0, 1)) + 
+  theme(panel.grid = element_blank(), 
+              panel.border = element_blank(), 
+              panel.background = element_blank(), 
+              axis.ticks = element_blank(), 
+              axis.text = element_text(color = "black"), 
+              axis.text.x = element_text(angle = 45, hjust = 1),
+              strip.background = element_blank(), 
+              strip.text = element_text(color = "black", face = "bold.italic", size = 12),
+              legend.position = "bottom", 
+              plot.title = element_blank()) + 
+  guides(color = "none") + 
+  coord_equal(clip = "off") + 
+  facet_grid(.~Mutant)
+
+arg_heat
+```
+
+## Plot cysteine biosynthesis from homoserine
+
+```{r}
+mut <- c("CBF1")
+loci <- c("MET2", "MET17", "CYS4", "CYS3")
+term <- "Cysteine biosynthesis"
+
+cur.df <- subset(master.df, Mutant %in% mut & Locus %in% loci)
+cur_melt.df <- melt(cur.df[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif")])
+
+# Format mutant labels
+cur_melt.df$Mutant <- paste0(tolower(cur_melt.df$Mutant), "∆")
+
+# Order locus by expression fold change
+cur_melt.df$Locus <- factor(cur_melt.df$Locus, levels = loci)
+
+colscale <- c("#264b96", "#bf212f")
+cys_heat <- ggplot(subset(cur_melt.df, variable != "hasMotif"), aes(x = Locus, y = variable, fill = value)) + 
+  geom_tile(color = "black", lwd = 0.5) + 
+  scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-0.75, 0.75), oob = scales::squish) + 
+  theme_bw() + 
+  scale_y_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"), labels = c("TF Occupancy \u0394", "Nuc Occupancy \u0394", "Expression", "Motif")) + 
+  labs(x = "", fill = "Log2 Fold Change", y = "", title = term) + 
+  ggnewscale::new_scale_fill() +
+  geom_point(data = subset(cur_melt.df, variable == "hasMotif"), shape = 17, size = 5, aes(color = value)) +
+  scale_color_gradient(low = "white", high = "black", limits = c(0, 1)) + 
+  theme(panel.grid = element_blank(), 
+              panel.border = element_blank(), 
+              panel.background = element_blank(), 
+              axis.ticks = element_blank(), 
+              axis.text = element_text(color = "black"), 
+              axis.text.x = element_text(angle = 45, hjust = 1),
+              strip.background = element_blank(), 
+              strip.text = element_text(color = "black", face = "bold.italic", size = 12),
+              legend.position = "bottom", 
+              plot.title = element_blank()) + 
+  guides(color = "none") + 
+  coord_equal(clip = "off") + 
+  facet_grid(.~Mutant)
+
+cys_heat
+# ggsave(heat, filename = paste0("/Users/kmoyung/Desktop/", term,".png"), dpi = 800, width = 4, height = 3)
+```
+
+## Plot heme biosynthesis and anaerobic genes
+
+```{r}
+mut <- c("ROX1")
+loci <- c("HEM1", "HEM2", "HEM3", "HEM4", "HEM12", "HEM13", "HEM14", "HEM15", "HAP1", "HAP4", "CIT1", "SDH1", "SDH2", "AAC3", "ANB1",
+          "DAN1", "FET4")
+term <- "Heme biosynthesis"
+
+cur.df <- subset(master.df, Mutant %in% mut & Locus %in% loci)
+cur_melt.df <- melt(cur.df[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif")])
+
+# Format mutant labels
+cur_melt.df$Mutant <- paste0(tolower(cur_melt.df$Mutant), "∆")
+
+# Order locus by expression fold change
+cur_melt.df$Locus <- factor(cur_melt.df$Locus, levels = loci)
+
+# Try Z-score normalization
+cur_melt.df <- cur_melt.df %>%
+  group_by(variable) %>%
+  mutate(Z_Value = scale(value))
+
+colscale <- c("#264b96", "#bf212f")
+rox1_heat <- ggplot(subset(cur_melt.df, variable != "hasMotif"), aes(x = Locus, y = variable, fill = value)) + 
+  geom_tile(color = "black", lwd = 0.5) + 
+  # scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-0.75, 0.75), oob = scales::squish) +
+  # scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-1, 1), oob = scales::squish) +
+  # scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-1.5, 1.5), oob = scales::squish) +
+  scale_fill_gradientn(colors = c(colscale[1], "white", "white", colscale[2]), values = scales::rescale(c(-1.5, -0.1, 0.1, 1.5)), limits = c(-1.5, 1.5), oob = scales::squish) +
+  theme_bw() + 
+  scale_y_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"), labels = c("TF Occupancy \u0394", "Nuc Occupancy \u0394", "Expression", "Motif")) + 
+  labs(x = "", fill = "Log2 Fold Change", y = "", title = term) + 
+  ggnewscale::new_scale_fill() +
+  geom_point(data = subset(cur_melt.df, variable == "hasMotif"), shape = 17, size = 5, aes(color = value)) +
+  scale_color_gradient(low = "white", high = "black", limits = c(0, 1)) + 
+  theme(panel.grid = element_blank(), 
+              panel.border = element_blank(), 
+              panel.background = element_blank(), 
+              axis.ticks = element_blank(), 
+              axis.text = element_text(color = "black"), 
+              axis.text.x = element_text(angle = 45, hjust = 1),
+              strip.background = element_blank(), 
+              strip.text = element_text(color = "black", face = "bold.italic", size = 12),
+              legend.position = "bottom", 
+              plot.title = element_blank()) + 
+  guides(color = "none") + 
+  coord_equal(clip = "off") + 
+  facet_grid(.~Mutant)
+
+rox1_heat
+# ggsave(heat, filename = paste0("/Users/kmoyung/Desktop/", term,".png"), dpi = 800, width = 4, height = 3)
+```
+
+## Plot the glycine, histidine, and purine pathways together from bas1
+
+```{r}
+mut <- c("BAS1")
+loci <- c("HIS1", "HIS4", "HIS6", "HIS7", "HIS3", "HIS5", "HIS2", "GCV1", "GCV2", "GCV3", "ADE4", "ADE5,7", "ADE8", "ADE6", "ADE2", "ADE1", "ADE12", "ADE13", "ADE16", "ADE17")
+term <- "Glycine, histidine, and purine pathways"
+
+cur.df <- subset(sig_chrom.df, Mutant %in% mut & Locus %in% loci)
+# cur.df <- subset(master.df, Mutant %in% mut & Locus %in% loci)
+cur_melt.df <- melt(cur.df[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif")])
+
+# Format mutant labels
+cur_melt.df$Mutant <- paste0(tolower(cur_melt.df$Mutant), "∆")
+
+# Order locus by expression fold change
+cur_melt.df$Locus <- factor(cur_melt.df$Locus, levels = loci)
+
+colscale <- c("#264b96", "#bf212f")
+bas1_sig_heat <- ggplot(subset(cur_melt.df, variable != "hasMotif"), aes(x = Locus, y = variable, fill = value)) + 
+  geom_tile(color = "black", lwd = 0.5) + 
+  scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-0.75, 0.75), oob = scales::squish) + 
+  theme_bw() + 
+  scale_y_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"), labels = c("TF Occupancy \u0394", "Nuc Occupancy \u0394", "Expression", "Motif")) + 
+  labs(x = "", fill = "Log2 Fold Change", y = "", title = term) + 
+  ggnewscale::new_scale_fill() +
+  geom_point(data = subset(cur_melt.df, variable == "hasMotif"), shape = 17, size = 5, aes(color = value)) +
+  scale_color_gradient(low = "white", high = "black", limits = c(0, 1)) + 
+  theme(panel.grid = element_blank(), 
+              panel.border = element_blank(), 
+              panel.background = element_blank(), 
+              axis.ticks = element_blank(), 
+              axis.text = element_text(color = "black"), 
+              axis.text.x = element_text(angle = 45, hjust = 1),
+              strip.background = element_blank(), 
+              strip.text = element_text(color = "black", face = "italic", size = 12),
+              legend.position = "bottom", 
+              plot.title = element_text(face = "bold", hjust = 0.5)) + 
+  guides(color = "none") + 
+  coord_equal(clip = "off") + 
+  facet_grid(.~Mutant)
+
+bas1_sig_heat
+# ggsave(heat, filename = paste0("/Users/kmoyung/Desktop/", term,".png"), dpi = 800, width = 4, height = 3)
+```
+
+Patch the examples together
+
+```{r}
+pathway_figure <- (cbf1_heat + bas1_sig_heat + pho85_heat) + plot_layout(guides = "collect", widths = c(6, 7, 4)) & theme(legend.position = "bottom", axis.text = element_text(color = "black"))
+pathway_figure
+
+ggsave(pathway_figure, filename = "/Users/kmoyung/Desktop/pathway_heatmap_figure.png", dpi = 800, width = 10, height = 4)
+```
+
+## GO enrichment for silent chromatin changes (green)
+
+```{r}
+# Get background of genes from dataset
+background_genes <- unique(master.df$Locus)
+
+# Use compareCluster to compare different mutants
+groups <- list()
+for (mut in unique(subset(sig_chrom.df, Point_Label == "Chrom")$Mutant)) {
+  sub.df <- subset(sig_chrom.df, Mutant == mut & Point_Label == "Chrom")
+  if (nrow(sub.df) > 0) {
+    groups[[paste0(tolower(mut), "\u0394")]] <- unique(sub.df$Locus)
+  }
+}
+
+silent_result_by_mutant <- compareCluster(groups, fun = "enrichGO", OrgDb = sacCer, pvalueCutoff = 0.05, qvalueCutoff = 0.5, ont = "BP", keyType = "GENENAME", pAdjustMethod = "BH", universe = background_genes)
+```
+
+Perform enrichment without grouping by mutant
+
+```{r}
+# Get background of genes from dataset
+background_genes <- unique(master.df$Locus)
+
+silent_result <- enrichGO(unique(subset(sig_chrom.df, Point_Label == "Chrom")$Locus), OrgDb = sacCer, pvalueCutoff = 0.05, qvalueCutoff = 0.5, ont = "BP", keyType = "GENENAME", pAdjustMethod = "BH", universe = background_genes)
+```
+
+

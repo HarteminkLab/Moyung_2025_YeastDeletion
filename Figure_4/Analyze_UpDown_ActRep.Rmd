@@ -1,0 +1,458 @@
+---
+title: "Analyze chromatin signatures between up/downregulated genes and activators/repressors"
+output: html_notebook
+---
+
+```{r}
+library(ggpubr)
+library(ggthemes)
+
+# Source the base code and functions
+if (Sys.info()[['sysname']] == "Windows") {
+  source("C:/Users/Kevin/Desktop/MacAlpine_KM/Code/get_midpoints.R")
+  gene.df = read.csv("D:/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv",header = T)
+} else {
+  gene.df = read.csv("/Users/kmoyung/MacAlpine_KM/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv", header = T)
+  source("/Users/kmoyung/MacAlpine_KM/Code/get_midpoints.R")
+}
+
+# Filter out genes with low MNase-seq coverage (must have > 70% read coverage)
+# filtered_genes <- fread("/Users/kmoyung/MacAlpine_KM/Metadata/filtered_genes_70coverage.txt", header = T)
+
+# Read peaks
+# peaks.df <- readRDS(file = "/Users/kmoyung/MacAlpine_KM/Metadata/nucleosome_peaks.RDS")
+```
+
+## Read in master diff
+
+```{r}
+master.df <- readRDS("/Users/kmoyung/Desktop/master_diff_length_corrected.RDS")
+```
+
+Add a laplacian curve as cutoff
+
+```{r}
+# Define the Laplace probability density function (PDF) with a scaling factor
+laplace_pdf <- function(x, mu, b, peak) {
+  return(peak * (1/(2*b) * exp(-abs(x - mu)/b)))
+}
+
+# Create a separate dataframe with the general x and y values
+x <- c(-4, -3, -1, 0, 1, 3, 4)
+y <- c(0, 0, 2.5, 10, 2.5, 0, 0)
+df <- data.frame(x, y)
+
+# Generate points for plotting the fitted curve
+scale_factor <- 19
+beta <- 1
+# curve_data <- data.frame(x = seq(min(df$x), max(df$x), length.out = 101))
+curve_data <- data.frame(x = seq(min(df$x), max(df$x), length.out = 33))
+curve_data$y <- laplace_pdf(curve_data$x, 0, beta, scale_factor)
+
+# Important: Add a closed-form boundary to the laplacian curve (to determine if points fall inside the polygon or not)
+curve_data <- rbind(c(-5, 0), curve_data, c(5, 0))
+```
+
+## Analyze chromatin signatures between up/downregulated genes
+
+Combined barplots
+
+```{r}
+# p <- 0.005
+expr_thresh <- 0.5
+# Label TF/nuc changes as gain or loss (consider adding this to the main master script)
+
+# Label points based on the laplacian cutoff
+reg_master.df <- master.df %>%
+  filter(sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & abs(Microarray_FC) >= expr_thresh) %>%
+  mutate(Chrom_Sig = case_when(Subnuc_Norm > 0  & Nuc_Norm > 0 ~ "TF Gain + Nuc Gain", 
+                             Subnuc_Norm > 0  & Nuc_Norm < 0 ~ "TF Gain + Nuc Loss", 
+                             Subnuc_Norm < 0  & Nuc_Norm > 0 ~ "TF Loss + Nuc Gain", 
+                             Subnuc_Norm < 0  & Nuc_Norm < 0 ~ "TF Loss + Nuc Loss", ), 
+         Expr = case_when(Microarray_FC > expr_thresh ~ "Upregulated", 
+                          Microarray_FC < -expr_thresh ~ "Downregulated"), 
+         Interaction = case_when(MacIsaac_Site == 1 | Rossi_Site == 1 | hasMotif == 1 ~ "Direct", 
+                                 TRUE ~ "Indirect")) 
+
+sig_plot <- ggplot(reg_master.df, aes(x = Chrom_Sig, group = Expr, fill = Expr)) + 
+  geom_bar(stat = "count", position = position_dodge2(preserve = "single"), color = "black") + 
+  theme_bw() + 
+  labs(x = "", y = "# of Genes", fill = "") + 
+  scale_fill_manual(values = c("Upregulated" = "#bf212f", "Downregulated" = "#264b96"), breaks = c("Upregulated", "Downregulated")) + 
+  theme(axis.text.x = element_text(color = "black"), 
+        axis.text.y = element_text(color = "black"), 
+        panel.grid = element_blank()) + 
+  coord_flip() 
+sig_plot
+
+sig_plot_faceted <- sig_plot + facet_wrap(.~Interaction)
+sig_plot_faceted
+```
+
+Violin plots of each chromatin feature
+
+```{r}
+reg_melt.df <- melt(reg_master.df[, c("Mutant", "Locus", "Microarray_FC", "Subnuc_Norm", "Nuc_Norm", "Expr", "Interaction")]) %>%
+  mutate(variable_f = factor(variable, levels = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC")))
+
+# Set dodge width
+dodge <- position_dodge(0.8)
+
+# Violin and boxplot plot
+featureplot_violin <- ggplot(subset(reg_melt.df), aes(x = variable_f, y = value, color = Expr)) + 
+  geom_hline(yintercept = 0, alpha = 0.3, linetype = "dashed") +
+  geom_violin(fill = "white", position = dodge) + 
+  geom_boxplot(width = 0.1, fill = "white", position = dodge, outlier.colour = NA, show.legend = F) + 
+  ylim(-3, 3) + 
+  theme_classic() + 
+  scale_color_manual(values = c("Upregulated" = "#bf212f", "Downregulated" = "#264b96"), breaks = c("Upregulated", "Downregulated"), labels = c("Upregulated", "Downregulated")) +
+  scale_x_discrete(labels = c("TF \n Occupancy", "Nuc \n Occupancy", "Expression")) + 
+  labs(x = "", y = "log2(FC)", color = "") + 
+  stat_compare_means(label = "p.signif", label.y = 2.65, show.legend = F) +
+  theme(axis.text = element_text(color = "black"), 
+        panel.grid = element_blank(), 
+        legend.position = "none")
+  
+featureplot_violin_faceted <- featureplot_violin + facet_wrap(.~Interaction)
+
+featureplot_violin
+featureplot_violin_faceted
+
+# ggsave(featureplot_violin_faceted, filename = "/Users/kmoyung/Desktop/transcription_features.png", dpi = 800, width = 6, height = 3)
+```
+
+Link TF occupancy + nucleosome occupancy with upregulation/downregulation
+
+```{r}
+# TEST: Perform z-score normalization on the fold changes for a more balanced view
+reg_melt.df <- reg_melt.df %>%
+  group_by(variable_f) %>%
+  mutate(scaled_value = scale(value))
+
+linkplot <- ggplot(reg_melt.df, aes(x = variable_f, y = value, group = interaction(Mutant, Locus, Expr))) + 
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") + 
+  geom_line(aes(color = Expr), alpha = 0.05, size = 1.25) + 
+  geom_point(aes(color = Expr), alpha = 0.1, size = 1.25) + 
+  theme_classic() + 
+  scale_color_manual(values = c("Upregulated" = "#bf212f", "Downregulated" = "#264b96"), breaks = c("Upregulated", "Downregulated"), labels = c("Upregulated", "Downregulated")) + 
+  labs(x = "", y = "log2(FC)", color = "") + 
+  scale_x_discrete(breaks = c("Microarray_FC", "Subnuc_Norm", "Nuc_Norm"), labels = c("Expression", "TF \n Occupancy", "Nuc \n Occupancy")) +
+  theme(panel.grid = element_blank()) + 
+  coord_cartesian(ylim = c(-5, 5)) + 
+  guides(color = guide_legend(override.aes = list(alpha = 1)))
+
+linkplot
+
+scaled_linkplot <- ggplot(reg_melt.df, aes(x = variable_f, y = scaled_value, group = interaction(Mutant, Locus, Expr))) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") +
+  geom_line(aes(color = Expr), alpha = 0.15, size = 1.25) +
+  geom_point(aes(color = Expr), alpha = 0.1) +
+  theme_bw() +
+  scale_color_manual(values = c("Upregulated" = "#bf212f", "Downregulated" = "#264b96"), breaks = c("Upregulated", "Downregulated"), labels = c("Upregulated", "Downregulated")) +
+  labs(x = "", y = "Gain/Loss (Z-Score)", color = "") +
+  scale_x_discrete(breaks = c("Microarray_FC", "Subnuc_Norm", "Nuc_Norm"), labels = c("Expression", "TF \n Occupancy", "Nuc \n Occupancy")) +
+  theme(legend.position = "bottom",
+        panel.grid = element_blank()) 
+
+scaled_linkplot
+```
+
+## Analyze chromatin signatures between activators/repressors
+
+Load mutant annotations (manually curated from SGD)
+
+```{r}
+mutant_info.df <- readxl::read_excel("/Users/kmoyung/MacAlpine_KM/Metadata/Mutant_Classification_SGD.xlsx")
+# table(mutant_info.df$TF_Class)
+# table(mutant_info.df$Type)
+
+# Separate into list of TFs (activators or repressors)
+activators <- unique(subset(mutant_info.df, Type == "TF" & TF_Class == "Activator")$Gene)
+repressors <- unique(subset(mutant_info.df, Type == "TF" & TF_Class == "Repressor")$Gene)
+```
+
+Subset for significant expression + chromatin change and label as activators/repressors
+
+```{r}
+sub_master.df <- master.df %>%
+  filter(sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & abs(Microarray_FC) >= expr_thresh) %>%
+  mutate(TF_Class = case_when(Mutant %in% activators ~ "Activator", 
+                              Mutant %in% repressors ~ "Repressor", 
+                              TRUE ~ "Unknown"), 
+         Interaction = case_when(MacIsaac_Site == 1 | Rossi_Site == 1 | hasMotif == 1 ~ "Direct", 
+                                 TRUE ~ "Indirect"))
+```
+
+Plot the number of genes with activators/repressors genes by their combined TF/nuc signatures
+
+```{r}
+# Label TF/nuc changes as gain or loss (consider adding this to the main master script)
+sub_master.df <- sub_master.df %>%
+  mutate(Chrom_Sig = case_when(Subnuc_Norm > 0  & Nuc_Norm > 0 ~ "TF Gain + Nuc Gain",
+                             Subnuc_Norm > 0  & Nuc_Norm < 0 ~ "TF Gain + Nuc Loss",
+                             Subnuc_Norm < 0  & Nuc_Norm > 0 ~ "TF Loss + Nuc Gain",
+                             Subnuc_Norm < 0  & Nuc_Norm < 0 ~ "TF Loss + Nuc Loss"))
+
+activator_repressor_sig_plot <- ggplot(subset(sub_master.df, TF_Class != "Unknown"), aes(x = Chrom_Sig, group = TF_Class, fill = TF_Class)) +
+  geom_bar(stat = "count", position = position_dodge2(preserve = "single"), color = "black") +
+  theme_bw() +
+  labs(x = "", y = "# of Genes", fill = "") +
+  scale_fill_manual(values = c("Activator" = "#87AEDF", "Repressor" = "#DA95CC"), breaks = c("Activator", "Repressor")) +
+  theme(axis.text.x = element_text(color = "black"),
+        axis.text.y = element_text(color = "black"), 
+        panel.grid = element_blank()) +
+  coord_flip() 
+
+activator_repressor_sig_plot
+
+activator_repressor_sig_plot_faceted <- activator_repressor_sig_plot + facet_wrap(Interaction~., ncol = 1)
+activator_repressor_sig_plot_faceted
+
+ggsave(activator_repressor_sig_plot_faceted, filename = "/Users/kmoyung/Desktop/activator_repressor_chromatin_signatures.png", dpi = 800, width = 6, height = 3)
+```
+Plot chromatin features between activators and repressors
+
+```{r}
+wide.df <- melt(sub_master.df[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "TF_Class", "Interaction")]) %>%
+  mutate(variable_f = factor(variable, levels = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC")))
+
+# Violin plot + boxplot
+dodge <- position_dodge(0.8) # Dodge width
+activator_repressor_featureplot_violin_faceted <- ggplot(subset(wide.df, TF_Class != "Unknown"), aes(x = variable_f, y = value, color = TF_Class)) + 
+  geom_hline(yintercept = 0, alpha = 0.3, linetype = "dashed") +
+  geom_violin(fill = "white", position = dodge) + 
+  geom_boxplot(width = 0.1, fill = "white", position = dodge, outlier.colour = NA) + 
+  ylim(-3, 3) + 
+  theme_classic() + 
+  scale_color_manual(values = c("Activator" = "#87AEDF", "Repressor" = "#DA95CC"), breaks = c("Activator", "Repressor")) +
+  scale_x_discrete(labels = c("TF \n Occupancy", "Nuc \n Occupancy", "Expression")) + 
+  labs(x = "", y = "log2(FC)", fill = "") + 
+  stat_compare_means(label = "p.signif", label.y = 2.65) +
+  theme(axis.text = element_text(color = "black"), 
+        panel.grid = element_blank(), 
+        strip.background = element_rect(color = NA, fill = NA), 
+        strip.text = element_text(color = "black"), 
+        legend.position = "none") + 
+  facet_wrap(.~Interaction, ncol = 1, scales = "free")
+
+activator_repressor_featureplot_violin_faceted
+
+# ggsave(activator_repressor_featureplot_violin_faceted, filename = "/Users/kmoyung/Desktop/activator_repressor_transcription_features.png", dpi = 800, width = 6, height = 3)
+# 
+# activator_repressor_featureplot_faceted + activator_repressor_featureplot_swarm_faceted + 
+#   activator_repressor_featureplot_violin_faceted + plot_layout(guides = "collect")
+```
+
+Link TF occupancy + nucleosome occupancy with activator/repressor activity
+
+```{r}
+activator_repressor_linkplot <- ggplot(subset(wide.df, TF_Class != "Unknown"), aes(x = variable_f, y = value, group = interaction(Mutant, Locus, TF_Class))) + 
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black") + 
+  geom_line(aes(color = TF_Class), alpha = 0.35, size = 1.25) + 
+  geom_point(aes(color = TF_Class), alpha = 0.1, size = 1.25) + 
+  theme_classic() + 
+  scale_color_manual(values = c("Activator" = "#87AEDF", "Repressor" = "#DA95CC"), breaks = c("Activator", "Repressor")) + 
+  labs(x = "", y = "log2(FC)", color = "") + 
+  scale_x_discrete(breaks = c("Microarray_FC", "Subnuc_Norm", "Nuc_Norm"), labels = c("Expression", "TF \n Occupancy", "Nuc \n Occupancy")) +
+  theme(panel.grid = element_blank(),
+        strip.background = element_rect(color = NA, fill = NA), 
+        strip.text = element_text(color = "black")) + 
+  facet_wrap(Interaction~., ncol = 1, scales = "free") +
+  coord_cartesian(ylim = c(-5, 5)) + 
+  guides(color = guide_legend(override.aes = list(alpha = 1)))
+  
+activator_repressor_linkplot
+```
+
+## Patch plots together
+
+```{r}
+patch <- (featureplot_violin + linkplot) / (activator_repressor_featureplot_violin_faceted + activator_repressor_linkplot) + plot_layout(guides = "collect", heights = c(1, 2)) +
+  plot_annotation(tag_levels = "A") & theme(plot.tag = element_text(face = "bold"))
+patch
+# ggsave(patch, filename = "/Users/kmoyung/Desktop/updown_actrep_features.png", dpi = 800, width = 8, height = 7)
+```
+
+## Add heatmaps for top most activated/repressed genes
+
+```{r}
+n <- 20
+
+# Get top 10 most upregulated genes
+most_upregulated <- reg_master.df %>%
+  arrange(desc(Microarray_FC)) %>%
+  dplyr::slice(1:n) %>%
+  arrange(Subnuc_Norm)
+
+# Get top 10 most downregulated genes
+most_downregulated <- reg_master.df %>%
+  arrange(Microarray_FC) %>%
+  dplyr::slice(1:n) %>%
+  arrange(desc(Subnuc_Norm))
+
+most_upregulated
+most_downregulated
+```
+Make upregulated heatmap
+
+```{r}
+up_melt.df <- melt(most_upregulated[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif")])
+
+# Format mutant labels
+up_melt.df$Mutant <- paste0(tolower(up_melt.df$Mutant), "∆")
+
+# Order locus by fold change
+up_melt.df$Locus <- factor(up_melt.df$Locus, levels = unique(most_upregulated$Locus))
+
+# Format heatmap labels
+up_melt.df$Label <- paste0(up_melt.df$Mutant, "-", up_melt.df$Locus)
+
+# Order by fold change
+up_melt.df$Label <- factor(up_melt.df$Label, levels = unique(up_melt.df$Label))
+
+colscale <- c("#264b96", "#bf212f")
+# up_heat <- ggplot(subset(up_melt.df, variable != "hasMotif"), aes(x = Label, y = variable, fill = value)) + 
+#   geom_tile(color = "black", lwd = 0.5) + 
+#   # scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-0.75, 0.75), oob = scales::squish) +
+#   scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-1, 1), oob = scales::squish) +
+#   # scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-1.5, 1.5), oob = scales::squish) +
+#   # scale_fill_gradientn(colors = c(colscale[1], "white", "white", colscale[2]), values = scales::rescale(c(-1.5, -0.1, 0.1, 1.5)), limits = c(-1.5, 1.5), oob = scales::squish) +
+#   theme_bw() + 
+#   scale_y_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"), labels = c("TF Occupancy", "Nuc Occupancy", "Expression", "Motif"), limits = rev) + 
+#   labs(x = "", fill = "Log2 Fold Change", y = "", title = "Top 20 Upregulated") + 
+#   ggnewscale::new_scale_fill() +
+#   geom_point(data = subset(up_melt.df, variable == "hasMotif"), shape = 18, size = 5, aes(color = value)) +
+#   scale_color_gradient(low = "white", high = "black", limits = c(0, 1)) + 
+#   theme(panel.grid = element_blank(), 
+#               panel.border = element_blank(), 
+#               panel.background = element_blank(), 
+#               axis.ticks = element_blank(), 
+#               axis.text = element_text(color = "black"), 
+#               axis.text.x = element_text(angle = 45, hjust = 1),
+#               strip.background = element_blank(), 
+#               strip.text = element_text(color = "black", face = "bold.italic", size = 12),
+#               legend.position = "right", 
+#               plot.title = element_text(hjust = 0.5)) + 
+#   guides(color = "none") +
+#   coord_flip(clip = "off")
+
+up_heat <- ggplot(subset(up_melt.df, variable != "hasMotif"), aes(y = Label, x = variable, fill = value)) + 
+  geom_tile(color = "black", lwd = 0.5) + 
+  # scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-0.75, 0.75), oob = scales::squish) +
+  scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-1, 1), oob = scales::squish) +
+  # scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-1.5, 1.5), oob = scales::squish) +
+  # scale_fill_gradientn(colors = c(colscale[1], "white", "white", colscale[2]), values = scales::rescale(c(-1.5, -0.1, 0.1, 1.5)), limits = c(-1.5, 1.5), oob = scales::squish) +
+  theme_bw() + 
+  scale_x_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"), labels = c("TF Occupancy", "Nuc Occupancy", "Expression", "Motif"), limits = rev) + 
+  labs(x = "", fill = "log2(FC)", y = "") + 
+  ggnewscale::new_scale_fill() +
+  geom_point(data = subset(up_melt.df, variable == "hasMotif"), shape = 18, size = 5, aes(color = value)) +
+  scale_color_gradient(low = "white", high = "black", limits = c(0, 1)) + 
+  theme(panel.grid = element_blank(), 
+              panel.border = element_blank(), 
+              panel.background = element_blank(), 
+              axis.ticks = element_blank(), 
+              axis.text = element_text(color = "black"), 
+              axis.text.x = element_text(angle = 45, hjust = 1),
+              axis.text.y = element_text(face = "italic"),
+              strip.background = element_blank(), 
+              strip.text = element_text(color = "black", face = "bold.italic", size = 12),
+              legend.position = "right", 
+              plot.title = element_text(hjust = 0.5), 
+              plot.margin = unit(c(5.5, 0.5, 5.5, 0.5), "points")) + 
+  guides(color = "none") +
+  coord_equal(clip = "off")
+
+up_heat
+```
+
+Make downregulated heatmap
+
+```{r}
+down_melt.df <- melt(most_downregulated[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif")])
+
+# Format mutant labels
+down_melt.df$Mutant <- paste0(tolower(down_melt.df$Mutant), "∆")
+
+# Order locus by expression fold change
+down_melt.df$Locus <- factor(down_melt.df$Locus, levels = unique(most_downregulated$Locus))
+
+# Format heatmap labels
+down_melt.df$Label <- paste0(down_melt.df$Mutant, "-", down_melt.df$Locus)
+
+# Order by fold change
+down_melt.df$Label <- factor(down_melt.df$Label, levels = unique(down_melt.df$Label))
+
+colscale <- c("#264b96", "#bf212f")
+# down_heat <- ggplot(subset(down_melt.df, variable != "hasMotif"), aes(x = Label, y = variable, fill = value)) + 
+#   geom_tile(color = "black", lwd = 0.5) + 
+#   # scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-0.75, 0.75), oob = scales::squish) +
+#   scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-1, 1), oob = scales::squish) +
+#   # scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-1.5, 1.5), oob = scales::squish) +
+#   # scale_fill_gradientn(colors = c(colscale[1], "white", "white", colscale[2]), values = scales::rescale(c(-1.5, -0.1, 0.1, 1.5)), limits = c(-1.5, 1.5), oob = scales::squish) +
+#   theme_bw() + 
+#   scale_y_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"), labels = c("TF Occupancy", "Nuc Occupancy", "Expression", "Motif"), limits = rev) + 
+#   labs(x = "", fill = "Log2 Fold Change", y = "", title = "Top 20 Downregulated") + 
+#   ggnewscale::new_scale_fill() +
+#   geom_point(data = subset(down_melt.df, variable == "hasMotif"), shape = 18, size = 5, aes(color = value)) +
+#   scale_color_gradient(low = "white", high = "black", limits = c(0, 1)) + 
+#   theme(panel.grid = element_blank(), 
+#               panel.border = element_blank(), 
+#               panel.background = element_blank(), 
+#               axis.ticks = element_blank(), 
+#               axis.text = element_text(color = "black"), 
+#               axis.text.x = element_text(angle = 45, hjust = 1),
+#               strip.background = element_blank(), 
+#               strip.text = element_text(color = "black", face = "bold.italic", size = 12),
+#               legend.position = "right", 
+#               plot.title = element_text(hjust = 0.5)) + 
+#   guides(color = "none") + 
+#   coord_flip(clip = "off")
+#   # coord_equal(clip = "off")
+
+down_heat <- ggplot(subset(down_melt.df, variable != "hasMotif"), aes(y = Label, x = variable, fill = value)) + 
+  geom_tile(color = "black", lwd = 0.5) + 
+  # scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-0.75, 0.75), oob = scales::squish) +
+  scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-1, 1), oob = scales::squish) +
+  # scale_fill_gradient2(low = colscale[1], high = colscale[2], mid = "white",  limits = c(-1.5, 1.5), oob = scales::squish) +
+  # scale_fill_gradientn(colors = c(colscale[1], "white", "white", colscale[2]), values = scales::rescale(c(-1.5, -0.1, 0.1, 1.5)), limits = c(-1.5, 1.5), oob = scales::squish) +
+  theme_bw() + 
+  scale_x_discrete(breaks = c("Subnuc_Norm", "Nuc_Norm", "Microarray_FC", "hasMotif"), labels = c("TF Occupancy", "Nuc Occupancy", "Expression", "Motif"), limits = rev) + 
+  labs(x = "", fill = "log2(FC)", y = "") + 
+  ggnewscale::new_scale_fill() +
+  geom_point(data = subset(down_melt.df, variable == "hasMotif"), shape = 18, size = 5, aes(color = value)) +
+  scale_color_gradient(low = "white", high = "black", limits = c(0, 1)) + 
+  theme(panel.grid = element_blank(), 
+              panel.border = element_blank(), 
+              panel.background = element_blank(), 
+              axis.ticks = element_blank(), 
+              axis.text = element_text(color = "black"), 
+              axis.text.x = element_text(angle = 45, hjust = 1),
+              axis.text.y = element_text(face = "italic"),
+              strip.background = element_blank(), 
+              strip.text = element_text(color = "black", face = "bold.italic", size = 12),
+              legend.position = "right", 
+              plot.title = element_text(hjust = 0.5), 
+              plot.margin = unit(c(5.5, 0.5, 5.5, 0.5), "points")) + 
+  guides(color = "none") + 
+  coord_equal(clip = "off")
+
+down_heat
+```
+
+Combine plots together
+
+```{r}
+up_heat + down_heat + plot_layout(guides = "collect")
+
+design <- "ABEF
+           CDEF
+           CDEF"
+
+patch <- featureplot_violin + linkplot + activator_repressor_featureplot_violin_faceted + activator_repressor_linkplot + up_heat + down_heat + plot_layout(guides = "collect", design = design)
+  # plot_annotation(tag_levels = "A") & theme(plot.tag = element_text(face = "bold"))
+patch
+
+ggsave(patch, filename = "/Users/kmoyung/Desktop/up_down_signatures.png", dpi = 800, height = 6.5, width = 13)
+```
+

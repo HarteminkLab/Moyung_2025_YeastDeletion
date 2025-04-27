@@ -1,0 +1,187 @@
+---
+title: "JS genome-wide heatmap"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+```
+
+
+## Load the master dataframe
+
+```{r}
+master.df <- readRDS("/Users/kmoyung/Desktop/master_diff_length_corrected.RDS")
+```
+
+## Set chromosome of interest and subset dataframe
+
+```{r}
+master.df$Chr <- gene.df$chrom[match(master.df$Locus, gene.df$alias)]
+master.df$Locus_Pos <- gene.df$tss[match(master.df$Locus, gene.df$alias)]
+master.df$Strand <- gene.df$strand[match(master.df$Locus, gene.df$alias)]
+
+master.df <- master.df %>%
+  mutate(Window_Start = ifelse(Strand == "+", Locus_Pos - 250, Locus_Pos + 250), 
+         Window_End = ifelse(Strand == "+", Locus_Pos + 500, Locus_Pos - 500))
+```
+
+## Label significant interactions
+
+```{r}
+# Expression threshold
+e <- 0.5
+# Significance threshold
+e_p <- 0.05
+
+# Label points based on the laplacian cutoff
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x / 1.15, curve_data$y / 1.15) == 0 & Microarray_FC >= e ~ "Up + Chrom",
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x / 1.15, curve_data$y / 1.15) == 0 & Microarray_FC <= -e ~ "Down + Chrom",
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x / 1.15, curve_data$y / 1.15) == 0 & between(Microarray_FC, -e, e) ~ "Chrom",
+    TRUE ~ "Other"
+  ))
+
+# Label points based on a gamma cutoff
+# p <- 0.00001
+# p <- 0.001
+# master.df <- master.df %>%
+#   mutate(Point_Label = case_when(
+#     gamma_pvals < p & Microarray_FC >= e ~ "Up + Chrom",
+#     gamma_pvals < p & Microarray_FC <= -e ~ "Down + Chrom",
+#     gamma_pvals < p & between(Microarray_FC, -e, e) ~ "Chrom",
+#     TRUE ~ "Other"
+#   ))
+```
+
+## Map gene coordinate as a heatmap of mutant (rows) and position along the chromosome (cols)
+
+```{r}
+# chr <- "chrIV"
+
+plots <- list()
+for (chr in chrs) {
+  chr_master.df <- subset(master.df, Chr == chr) %>%
+    mutate(Sig_JS = ifelse(Point_Label %in% c("Up + Chrom", "Down + Chrom", "Chrom"), "Yes", "No"))
+  
+  chr_start <- subset(coordinates, Chr == chr)$Start
+  # chr_end <- 100000
+  chr_end <- subset(coordinates, Chr == chr)$End
+  
+  plots[[chr]] <- ggplot(chr_master.df) + 
+    geom_segment(aes(y = Mutant, yend = Mutant, x = chr_start, xend = chr_end), color = "grey90") +
+    geom_segment(data = subset(chr_master.df, Sig_JS == "Yes"), aes(y = Mutant, yend = Mutant, x = Window_Start, xend = Window_End), color = "purple", linewidth = 2) +
+    # geom_point(data = subset(chr_master.df, Sig_JS == "Yes"), aes(y = Mutant, x = Locus_Pos, color = Sig_JS), size = 0.5) +
+    # scale_color_manual(values = c("Yes" = "purple")) + 
+    coord_cartesian(xlim = c(0, chr_end), expand = c(0,0)) + 
+    theme_bw() + 
+    theme(panel.grid = element_blank(), 
+          axis.text.y = element_blank(), 
+          # axis.text.x = element_blank(), 
+          axis.ticks.y = element_blank(),
+          legend.position = "none", 
+          plot.margin = margin(0.5, 1, 0.5, 0.5, "cm"), 
+          plot.title = element_text(hjust = 0.5)) + 
+    labs(x = paste0(chr), y = "Mutants", title = "Laplacian Cutoff")
+    # guides(color = guide_legend(override.aes = list(size = 8)))
+
+  ggsave(plots[[chr]], filename = paste0("/Users/kmoyung/genome_js_plots/", chr, "js_genomeplot.png"), dpi = 800, width = 3, height = 6)
+}
+
+```
+
+## Linearized version with all chromosomes (laplacian)
+
+```{r}
+all_chr_master.df <- master.df %>%
+  mutate(Sig_JS = ifelse(Point_Label %in% c("Up + Chrom", "Down + Chrom", "Chrom"), "Yes", "No"))
+
+# Strip the "chr" portion of the chromosome labels
+all_chr_master.df$Chr <- substr(all_chr_master.df$Chr, 4, nchar(all_chr_master.df$Chr))
+
+# Order chromosomes by actual order
+all_chr_master.df$Chr <- factor(all_chr_master.df$Chr, levels = substr(chrs, 4, nchar(chrs)))
+
+linear_plot <- ggplot(all_chr_master.df) + 
+  # geom_segment(aes(y = Mutant, yend = Mutant, x = chr_start, xend = chr_end), color = "grey90") +
+  # geom_segment(data = subset(all_chr_master.df, Sig_JS == "Yes"), aes(y = Mutant, yend = Mutant, x = Window_Start, xend = Window_End), color = "purple", linewidth = 2) +
+  geom_point(data = subset(all_chr_master.df, Sig_JS == "Yes"), aes(y = Mutant, x = Locus_Pos), size = 1, color = "purple", shape = 15) +
+  # scale_color_manual(values = c("Yes" = "purple")) + 
+  # coord_cartesian(xlim = c(0, chr_end), expand = c(0,0)) + 
+  theme_bw() + 
+  theme(panel.grid.major.y = element_line(color = "grey"),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(), 
+        panel.grid.minor.y = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(), 
+        axis.ticks.y = element_blank(),
+        legend.position = "none", 
+        # plot.margin = margin(0.5, 1, 0.5, 0.5, "cm"), 
+        plot.title = element_text(hjust = 0.5),
+        strip.clip = "off", 
+        strip.background = element_blank(), 
+        panel.border = element_rect(color = "black", fill = NA)) + 
+  labs(x = "Genome (bp)", y = "Mutants", title = "Laplacian Cutoff") + 
+  facet_grid(.~Chr, space = "free_x", scales = "free_x")
+
+linear_plot
+
+ggsave(linear_plot, filename = "/Users/kmoyung/genome_js_plots/all_chrs_js_laplacian_new.png", dpi = 800, width = 12, height = 4)
+```
+
+## Make linearized plot using the original JS cutoff
+
+```{r}
+# Label points based on a gamma cutoff
+# p <- 0.00001
+p <- 0.00001
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    gamma_pvals < p & Microarray_FC >= e ~ "Up + Chrom",
+    gamma_pvals < p & Microarray_FC <= -e ~ "Down + Chrom",
+    gamma_pvals < p & between(Microarray_FC, -e, e) ~ "Chrom",
+    TRUE ~ "Other"
+  ))
+
+all_chr_master.df <- master.df %>%
+  mutate(Sig_JS = ifelse(Point_Label %in% c("Up + Chrom", "Down + Chrom", "Chrom"), "Yes", "No"))
+
+# Strip the "chr" portion of the chromosome labels
+all_chr_master.df$Chr <- substr(all_chr_master.df$Chr, 4, nchar(all_chr_master.df$Chr))
+
+# Order chromosomes by actual order
+all_chr_master.df$Chr <- factor(all_chr_master.df$Chr, levels = substr(chrs, 4, nchar(chrs)))
+
+linear_plot_js <- ggplot(all_chr_master.df) + 
+  # geom_segment(aes(y = Mutant, yend = Mutant, x = chr_start, xend = chr_end), color = "grey90") +
+  # geom_segment(data = subset(all_chr_master.df, Sig_JS == "Yes"), aes(y = Mutant, yend = Mutant, x = Window_Start, xend = Window_End), color = "purple", linewidth = 2) +
+  geom_point(data = subset(all_chr_master.df, Sig_JS == "Yes"), aes(y = Mutant, x = Locus_Pos), size = 1, color = "purple", shape = 15) +
+  # scale_color_manual(values = c("Yes" = "purple")) + 
+  # coord_cartesian(xlim = c(0, chr_end), expand = c(0,0)) + 
+  theme_bw() + 
+  theme(panel.grid.major.y = element_line(color = "grey"),
+        panel.grid.minor.x = element_blank(),
+        panel.grid.major.x = element_blank(), 
+        panel.grid.minor.y = element_blank(), 
+        axis.text.y = element_blank(), 
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(), 
+        axis.ticks.y = element_blank(),
+        legend.position = "none", 
+        # plot.margin = margin(0.5, 1, 0.5, 0.5, "cm"), 
+        plot.title = element_text(hjust = 0.5), 
+        strip.clip = "off", 
+        strip.background = element_blank(), 
+        panel.border = element_rect(color = "black", fill = NA)) + 
+  labs(x = "Genome (bp)", y = "Mutants", title = "Preliminary Cutoff (p < 0.005)") + 
+  facet_grid(.~Chr, space = "free_x", scales = "free_x")
+
+linear_plot_js
+
+ggsave(linear_plot_js, filename = "/Users/kmoyung/genome_js_plots/all_chrs_js_new.png", dpi = 800, width = 12, height = 4)
+```
+
+

@@ -1,0 +1,307 @@
+---
+title: "Compare Pseudocontrol with WT"
+output: html_notebook
+---
+
+## Load additional libraries and data
+
+```{r}
+library(ggpubr)
+
+master.df <- readRDS("/Users/kmoyung/Desktop/master_diff_length_corrected.RDS")
+```
+
+## Override functions to read in MNase BAM files from cadmium data
+
+```{r}
+get_midpoint_cadmium <- function(Gene,chr,start_pos,end_pos){
+  # mutants <- read.table("/Users/kmoyung/MacAlpine_KM/HARDAC_scripts/Mutants_List.txt", header = F)
+  dm_id <- "DM498"
+  filename=list.files(path=paste0('/Users/kmoyung/cadmium_data/', dm_id),pattern = glob2rx("*.bam"),full.names = T)
+  range.gr=GRanges(seqnames = chr,
+                   ranges = IRanges(start=start_pos-500,end=end_pos+500))
+  p = ScanBamParam(what = c("rname","pos", "strand", "isize"),which=range.gr)
+  reads.l=scanBam(filename,param = p)
+  reads.gr=GRanges(seqnames = reads.l[[1]][['rname']],
+                   ranges = IRanges(start = reads.l[[1]][['pos']],width = pmax(1, reads.l[[1]][['isize']])))
+  reads.gr=reads.gr[width(reads.gr)<=250]
+  mnase.df=data.frame(mid=start(reads.gr)+floor((width(reads.gr)-1)/2),length=width(reads.gr))
+  mnase_mid.df=subset(mnase.df,mid>=start_pos&mid<=end_pos & length > 1)
+  return(mnase_mid.df)
+}
+
+## get_samples(mut): Returns a list of dataframes of reads, one df for every chromosome
+get_cadmium <- function(mut, set_chr) {
+  # Check if we want a specific chr or all the chrs
+  if (set_chr != "all") {
+    cur_chr <- set_chr
+    chr_start <- coordinates[match(cur_chr, coordinates$Chr), "Start"]
+    chr_end <- coordinates[match(cur_chr, coordinates$Chr), "End"]
+    mid.df <- get_midpoint_cadmium(mut, cur_chr, chr_start, chr_end)
+    
+    # Truncate locations with more than n duplicate reads in the sample
+    depth <- mut_reads.df[mut_reads.df$Mutant == mut, "Count"]
+    n_dupes <- ceiling(depth / 4000000)
+    mid.dt <- as.data.table(mid.df)
+    freq_mid.dt <- mid.dt[, .N, by=names(mid.dt)]
+    freq_mid.dt[freq_mid.dt$N > n_dupes, "N"] <- n_dupes
+    filtered_mid.df <- data.frame(freq_mid.dt[rep(seq_len(dim(freq_mid.dt)[1]), freq_mid.dt$N), 1:2, drop = FALSE], row.names=NULL)
+    
+    return(filtered_mid.df)
+  } else {
+    samples <- list()
+    for (cur_chr in chrs) {
+      chr_start <- coordinates[match(cur_chr, coordinates$Chr), "Start"]
+      chr_end <- coordinates[match(cur_chr, coordinates$Chr), "End"]
+      mid.df <- get_midpoint_cadmium(mut, cur_chr, chr_start, chr_end)
+      
+      # Truncate locations with more than n duplicate reads in the sample
+      depth <- mut_reads.df[mut_reads.df$Mutant == mut, "Count"]
+      n_dupes <- ceiling(depth / 4000000)
+      mid.dt <- as.data.table(mid.df)
+      freq_mid.dt <- mid.dt[, .N, by=names(mid.dt)]
+      freq_mid.dt[freq_mid.dt$N > n_dupes, "N"] <- n_dupes
+      filtered_mid.df <- data.frame(freq_mid.dt[rep(seq_len(dim(freq_mid.dt)[1]), freq_mid.dt$N), 1:2, drop = FALSE], row.names=NULL)
+      
+      samples[[cur_chr]] <- filtered_mid.df
+    }
+    return(samples)
+  }
+  
+}
+```
+
+
+## Load control and cadmium WT (0 min.)
+
+```{r}
+cadmium_wt <- get_cadmium("CBF1", "chrIV")
+pseudocontrols <- get_controls("chrIV", "CBF1")
+
+cad_wt.df <- cadmium_wt
+cad_wt.df$Sample <- "WT"
+pseudo.df <- pseudocontrols
+pseudo.df$Sample <- "Baseline"
+
+merged.df <- bind_rows(cad_wt.df, pseudo.df)
+```
+
+## Plot fragment distribution on chrIV
+
+```{r}
+length_distr <- ggplot(merged.df, aes(x = length, group = Sample, color = Sample)) + 
+  geom_density() + 
+  theme_bw() + 
+  theme(panel.grid = element_blank(), 
+        plot.title = element_text(hjust = 0.5), 
+        legend.position = "none") + 
+  labs(x = "MNase Fragment Length (chrIV)", y = "Density", 
+       title = "Distribution of MNase Fragment Length") + 
+  scale_color_manual(values = c("Baseline" = "#283618", "WT" = "#bc6c25"))
+
+pos_distr <- ggplot(merged.df, aes(x = mid, group = Sample, color = Sample)) + 
+  geom_density(bounds = c(10000, 1526933)) + 
+  theme_bw() + 
+  theme(panel.grid = element_blank(), 
+        plot.title = element_text(hjust = 0.5)) + 
+  labs(x = "MNase Fragment Position (chrIV)", y = "Density", 
+       title = "Distribution of MNase Fragment Positions") + 
+  scale_color_manual(values = c("Baseline" = "#283618", "WT" = "#bc6c25"))
+
+length_distr
+pos_distr
+```
+
+## Load quantifications from HARDAC
+
+```{r}
+pseudo_cad.df <- readRDS("/Users/kmoyung/cadmium_data/cad_quantifications.RDS")
+
+# Filter out genes with low MNase-seq coverage (must have > 70% read coverage)
+filtered_genes <- fread("/Users/kmoyung/MacAlpine_KM/Metadata/filtered_genes_70coverage.txt", header = T)
+
+# Filter genes with less than 70% coverage and normalize counts
+pseudo_cad.df <- pseudo_cad.df %>%
+  filter(Mut_Subnucs > 0) %>%
+  # filter(Locus %in% filtered_genes$x & Mut_Subnucs > 0) %>% 
+  mutate(Norm_Mut_Subnucs = Mut_Subnucs / sum(Mut_Subnucs), 
+         Norm_Control_Subnucs = Control_Subnucs / sum(Control_Subnucs),
+         Norm_Mut_Nucs = Mut_Nucs / sum(Mut_Nucs), 
+         Norm_Control_Nucs = Control_Nucs / sum(Control_Nucs))
+  # filter(Locus %in% unique(master.df$Locus))
+
+# Filter for genes only on chrIV
+# pseudo_cad.df <- pseudo_cad.df %>%
+#   filter(Locus %in% subset(gene.df, chrom == "chrIV")$alias)
+```
+
+## Plot differences
+
+```{r}
+library(ggpointdensity)
+
+nuc_diff <- ggplot(pseudo_cad.df, aes(x = Mut_Nucs, y = Control_Nucs)) + 
+  geom_pointdensity(adjust = 8) +
+  stat_cor() +
+  scale_color_viridis(direction = -1, option = "mako") + 
+  theme_bw() +
+  labs(x = "WT Nucleosome Occupancy", y = "Baseline Nucleosome Occupancy", 
+       title = "Gene-Specific Nucleosome Occupancy") + 
+  theme(legend.position = "none", 
+        plot.title = element_text(hjust = 0.5), 
+        panel.grid = element_blank())
+
+tf_diff <- ggplot(pseudo_cad.df, aes(x = Mut_Subnucs, y = Control_Subnucs)) + 
+  geom_pointdensity(adjust = 8) + 
+  stat_cor() + 
+  scale_color_viridis(direction = -1, option = "mako") + 
+  theme_bw() + 
+  labs(x = "WT TF Occupancy", y = "Baseline TF Occupancy", 
+       title = "Gene-Specific TF Occupancy") + 
+  theme(legend.position = "none", 
+        plot.title = element_text(hjust = 0.5), 
+        panel.grid = element_blank())
+
+nuc_diff
+tf_diff
+```
+
+## TODO: Compare a mutant with WT as well as mutant with pseudocontrol
+
+```{r}
+mut <- "CBF1"
+sub_master.df <- subset(master.df, Mutant == mut)[, c("Locus", "Mut_Nucs", "Control_Nucs", "Mut_Subnucs", "Control_Subnucs")]
+colnames(sub_master.df) <- c("Locus", "CBF1_Nucs", "Pseudo_Nucs", "CBF1_Subnucs", "Pseudo_Subnucs")
+
+compare.df <- merge(pseudo_cad.df, sub_master.df, by = "Locus")
+
+ggplot(compare.df, aes(x = CBF1_Nucs, y = Mut_Nucs)) + 
+  geom_pointdensity(adjust = 8) +
+  stat_cor() +
+  scale_color_viridis() + 
+  theme_bw() +
+  labs(x = "cbf1∆ Nucleosome Occupancy", y = "WT Nucleosome Occupancy", 
+       title = "Gene-Specific Nucleosome Occupancy") + 
+  theme(legend.position = "none", 
+        plot.title = element_text(hjust = 0.5))
+
+ggplot(compare.df, aes(x = CBF1_Nucs, y = Control_Nucs)) + 
+  geom_pointdensity(adjust = 8) +
+  stat_cor() +
+  scale_color_viridis() + 
+  theme_bw() +
+  labs(x = "cbf1∆ Nucleosome Occupancy", y = "Baseline Nucleosome Occupancy", 
+       title = "Gene-Specific Nucleosome Occupancy") + 
+  theme(legend.position = "none", 
+        plot.title = element_text(hjust = 0.5))
+```
+## TODO: Calculate correlations for all mutant vs. wt compared to mutant vs. pseudocount
+
+```{r}
+correlations.df <- data.frame(Mutant = unique(master.df$Mutant), Nuc_Pseudo = 0, Nuc_WT = 0, Subnuc_Pseudo = 0, Subnuc_WT = 0)
+for (i in 1:nrow(correlations.df)) {
+  mut <- correlations.df$Mutant[i]
+  cur_mut.df <- subset(master.df, Mutant == mut)[, c("Locus", "Mut_Nucs", "Control_Nucs", "Mut_Subnucs", "Control_Subnucs")]
+  colnames(cur_mut.df) <- c("Locus", "Cur_Nucs", "Pseudo_Nucs", "Cur_Subnucs", "Pseudo_Subnucs")
+
+  cur_compare.df <- merge(pseudo_cad.df, cur_mut.df, by = "Locus")
+
+  wt_nuc_cor <- cor(cur_compare.df$Mut_Nucs, cur_compare.df$Cur_Nucs, use = "complete.obs")
+  pseudo_nuc_cor <- cor(cur_compare.df$Control_Nucs, cur_compare.df$Cur_Nucs, use = "complete.obs")
+  
+  wt_subnuc_cor <- cor(cur_compare.df$Mut_Subnucs, cur_compare.df$Cur_Subnucs, use = "complete.obs")
+  pseudo_subnuc_cor <- cor(cur_compare.df$Control_Subnucs, cur_compare.df$Cur_Subnucs, use = "complete.obs")
+  
+  correlations.df$Nuc_Pseudo[i] <- pseudo_nuc_cor
+  correlations.df$Nuc_WT[i] <- wt_nuc_cor
+  correlations.df$Subnuc_Pseudo[i] <- pseudo_subnuc_cor
+  correlations.df$Subnuc_WT[i] <- wt_subnuc_cor
+  
+}
+```
+
+Plot 
+
+```{r}
+# Order mutants by highest pseudocontrol nuc correlation
+correlations.df <- correlations.df %>%
+  arrange(-Nuc_Pseudo)
+
+melt_correlations.df <- melt(correlations.df)
+
+# melt_correlations.df$Mutant <- factor(melt_correlations.df$Mutant, levels = correlations.df$Mutant)
+
+# Calculate median correlations
+med_nuc_pseudo <- median(correlations.df$Nuc_Pseudo)
+med_nuc_wt <- median(correlations.df$Nuc_WT)
+med_subnuc_pseudo <- median(correlations.df$Subnuc_Pseudo)
+med_subnuc_wt <- median(correlations.df$Subnuc_WT)
+
+nuc_corplot <- ggplot(subset(melt_correlations.df, variable %in% c("Nuc_Pseudo", "Nuc_WT"))) + 
+  geom_point(aes(x = Mutant, y = value, color = variable)) + 
+  scale_color_manual(values = c("Nuc_Pseudo" = "#542788", "Nuc_WT" = "skyblue"), labels = c("Baseline", "WT")) + 
+  geom_hline(yintercept = med_nuc_pseudo, linetype = "dashed", color = "#542788") + 
+  geom_hline(yintercept = med_nuc_wt, linetype = "dashed", color = "skyblue") + 
+  theme_bw() + 
+  theme(panel.grid = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        axis.text.x = element_blank(), 
+        plot.title = element_text(hjust = 0.5)) + 
+  labs(x = "Mutant", y = "Correlation", color = "Baseline", title = "Nucleosome Occupancy") + 
+  coord_cartesian(expand = c(0,0))
+
+subnuc_corplot <- ggplot(subset(melt_correlations.df, variable %in% c("Subnuc_Pseudo", "Subnuc_WT"))) + 
+  geom_point(aes(x = Mutant, y = value, color = variable)) + 
+  scale_color_manual(values = c("Subnuc_Pseudo" = "#FDB863", "Subnuc_WT" = "navy"), labels = c("Baseline", "WT")) + 
+  geom_hline(yintercept = med_subnuc_pseudo, linetype = "dashed", color = "#FDB863") + 
+  geom_hline(yintercept = med_subnuc_wt, linetype = "dashed", color = "navy") + 
+  theme_bw() + 
+  theme(panel.grid = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        axis.text.x = element_blank(), 
+        plot.title = element_text(hjust = 0.5)) + 
+  labs(x = "Mutant", y = "Correlation", color = "Baseline", title = "TF Occupancy") + 
+  coord_cartesian(expand = c(0,0))
+
+patch <- nuc_corplot / subnuc_corplot
+patch
+
+# ggsave(patch, filename = "/Users/kmoyung/supp_figures/mutant_wt_pseudocontrol_correlations.png", dpi = 800, width = 8, height = 6)
+
+```
+
+Plot as scatterplot (pseudo vs. wt)
+
+```{r}
+nuc_cor <- ggplot(correlations.df, aes(x = Nuc_WT, y = Nuc_Pseudo)) + 
+  geom_point(color = "#542788") + 
+  geom_abline(intercept = 0, slope = 1) + 
+  theme_bw() + 
+  labs(x = "WT vs. Mutant Nucleosome Correlation", y = "Baseline vs. Mutant\nNucleosome Correlation") + 
+  xlim(0.7, 1) + 
+  ylim(0.7, 1)
+
+subnuc_cor <- ggplot(correlations.df, aes(x = Subnuc_WT, y = Subnuc_Pseudo)) + 
+  geom_point(color = "#FDB863") + 
+  geom_abline(intercept = 0, slope = 1) + 
+  theme_bw() + 
+  labs(x = "WT vs. Mutant TF Correlation", y = "Baseline vs. Mutant\nTF Correlation") + 
+  xlim(0.7, 1) + 
+  ylim(0.7, 1)
+
+patch <- nuc_cor + subnuc_cor
+patch
+
+# ggsave(patch, filename = "/Users/kmoyung/supp_figures/mutant_wt_pseudocontrol_correlations_scatter.png", dpi = 800, width = 8, height = 4)
+```
+
+# Patch final figure for supplement
+
+```{r}
+patch <- (length_distr | pos_distr) / (nuc_diff | tf_diff) / (nuc_cor | subnuc_cor) + 
+  plot_annotation(tag_levels = "A") & theme(plot.tag = element_text(face = "bold"))
+patch
+
+ggsave(patch, filename = "/Users/kmoyung/supp_figures/new_pseudocontrol_vs_wt.png", dpi = 800, width = 9, height = 8)
+```
+

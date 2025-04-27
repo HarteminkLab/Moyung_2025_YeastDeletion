@@ -1,0 +1,392 @@
+---
+title: "Plot Detailed Typhoon Plots"
+output: html_notebook
+---
+
+```{r}
+# Source the base code and functions
+if (Sys.info()[['sysname']] == "Windows") {
+  source("C:/Users/Kevin/Desktop/MacAlpine_KM/Code/get_midpoints.R")
+  gene.df = read.csv("D:/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv",header = T)
+} else {
+  # Read in sample IDs for MNase-seq and RNA-seq files
+  sample_IDs <- read.table("/Users/kmoyung/MacAlpine_KM/mnase_rna_sampleIDs.txt", header = F)
+  gene.df = read.csv("/Users/kmoyung/MacAlpine_KM/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv", header = T)
+  source("/Users/kmoyung/MacAlpine_KM/Code/get_midpoints.R")
+  source("/Users/kmoyung/MacAlpine_KM/Code/sample_by_fragment_length.R")
+}
+```
+
+## Read-in master.df
+
+```{r}
+master.df <- readRDS("/Users/kmoyung/Desktop/master_diff_length_corrected.RDS")
+```
+
+## Override plotting functions
+
+```{r}
+# Plot genes using the gggenes package
+library(gggenes)
+plot_genes <- function(locus, chr, start, end) {
+  geneplot <- ggplot(subset(gene.df, chrom == chr & (between(tss, start, end) | between(pas, start, end))),
+                       aes(xmin = left_coord, xmax = right_coord, y = 1, forward = ifelse(strand == "+", 1, 0), label = alias)) +
+      geom_gene_arrow(fill = "grey90", arrow_body_height = grid::unit(6, "mm"), 
+                      arrowhead_height = unit(6, "mm"), 
+                      arrowhead_width = unit(1, "mm")) +
+      geom_feature(aes(x = ifelse(strand == "+", left_coord, right_coord), forward = ifelse(strand == "+", 1, 0), y = 1), 
+                   feature_height = unit(6, "mm")) + 
+      geom_text(data = subset(gene.df, alias %in% locus), aes(x = ifelse(strand == "+", left_coord + 200, right_coord - 200), label = alias), fontface = "bold.italic") + 
+      theme_void() +
+      coord_cartesian(xlim = c(start, end), clip = "on", expand = c(0,0))
+  return(geneplot)
+}
+
+# Plot sample typhoon plot
+plot_sample_typhoon <- function(mut, chr, start, end, prom_start, prom_end, nuc_coords, tf_coords) {
+  
+  # Get the sample df
+  mid.df <- get_samples(mut, chr)
+  
+  # Get the control df
+  control.df <- get_controls(chr, mut)
+  
+  # Re-sample by fragment length distribution in the control
+  mid.df <- sample_by_fragment_length(mid.df, control.df)
+  
+  # Subset for the locus
+  mid.df <- subset(mid.df, mid >= start & mid <= end)
+  
+  # Calculate smoothed density values
+  mid.df$density <- get_density(mid.df$mid, mid.df$length, 
+                                         n = 200, 
+                                         h = c(25, 30))
+  
+  # Calculate color scale limit based on window length
+  color_lim <- c(0, 0.08 / (end - start))
+  
+  plot_sample <- ggplot(mid.df[order(mid.df$density), ]) + 
+    # geom_rect(data = tf_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = NA, alpha = 0.2, fill = "#FDB863") + 
+    # geom_rect(data = nuc_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = NA, alpha = 0.2, fill = "#8073AC") + 
+    # geom_point(aes(x = mid, y = length), size = 0.45, shape = 20, fill = "gray") +
+    geom_point(aes(x = mid, y = length, color = density), size = 0.45, shape = 20) +
+    # scale_color_gradientn(colors = rev(magma(6)[-1]), limits = c(0, 0.00003), oob = scales::squish) +
+    scale_color_gradientn(colors = rev(magma(6)[-1]), limits = color_lim, oob = scales::squish) +
+    # ggtitle(paste0(tolower(mut),"\u0394")) +
+    theme_bw() +
+    theme(panel.grid = element_blank(), 
+          legend.position = "none", 
+          plot.title = element_text(face = "italic")) + 
+    labs(y = "Length", x = paste0(chr, ":", start, "-", end), color = "Density") +
+    coord_cartesian(xlim = c(start, end), expand = c(0, 0))
+  
+  return(plot_sample)
+}
+
+# Plot control typhoon plot
+plot_control_typhoon <- function(chr, start, end, mut, prom_start, prom_end, nuc_coords, tf_coords) {
+  # Get the control df
+  control.df <- get_controls(chr, mut)
+  
+  # Subset for the locus
+  control.df <- subset(control.df, mid >= start & mid <= end)
+  
+  # Calculate smoothed density values
+  control.df$density <- get_density(control.df$mid, control.df$length,
+                                    n = 200,
+                                    h = c(25, 30))
+  
+  # Test: Calculate color scale limit based on window length
+  color_lim <- c(0, 0.08 / (end - start))
+
+  plot_control <- ggplot(control.df[order(control.df$density), ]) +
+    # geom_rect(data = tf_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = NA, alpha = 0.2, fill = "#FDB863") + 
+    # geom_rect(data = nuc_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = NA, alpha = 0.2, fill = "#8073AC") + 
+    # geom_point(aes(x = mid, y = length), size = 0.45, shape = 20, fill = "gray") +
+    geom_point(aes(x = mid, y = length, color = density), size = 0.45, shape = 20) +
+    # scale_color_gradientn(colors = rev(magma(6)[-1]), limits = c(0, 0.00003), oob = scales::squish) +
+    scale_color_gradientn(colors = rev(magma(6)[-1]), limits = color_lim, oob = scales::squish) +
+    # ggtitle(paste0("Control")) +
+    theme_bw() +
+    theme(panel.grid = element_blank(), 
+          legend.position = "none", 
+          # axis.text.x = element_blank(), 
+          axis.title.x = element_blank()) +
+    labs(y = "Length", x = chr, color = "Density") +
+    coord_cartesian(xlim = c(start, end), expand = c(0, 0))
+  
+  return(plot_control)
+}
+```
+
+## Plot for GAL1-10 locus
+
+```{r}
+mut <- "GAL80"
+locus <- "GAL1"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+start <- 277000
+end <- 280000
+
+print(start)
+print(end)
+
+# Get special promoter window for both GAL1 and GAL10
+prom_start <- 278352
+prom_end <- 279020
+
+# Get coordinates for promoter TF and gene body nucleosomes
+nuc_coords <- data.frame(x1 = c(277852, 279021), x2 = c(278352, 279521), y1 = c(140, 140), y2 = c(200, 200))
+tf_coords <- data.frame(x1 = c(prom_start, prom_end - 250), x2 = c(prom_start + 250, prom_end), y1 = c(40), y2 = c(100))
+
+geneplot <- plot_genes(c("GAL1", "GAL10"), chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end, nuc_coords, tf_coords)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end, nuc_coords, tf_coords)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+
+# Add boxes highlighting TF and nuc occupancy changes
+controlplot_highlight <- controlplot + 
+  annotate("rect", xmin = tf_coords$x1, xmax = tf_coords$x2, ymin = tf_coords$y1, ymax = tf_coords$y2, color = NA, alpha = 0.2, fill = "#FDB863") + 
+  geom_rect(data = tf_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "black", alpha = 1, fill = NA) + 
+  annotate("rect", xmin = nuc_coords$x1, xmax = nuc_coords$x2, ymin = nuc_coords$y1, ymax = nuc_coords$y2, color = NA, alpha = 0.2, fill = "#8073AC") + 
+  geom_rect(data = nuc_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "#8073AC", alpha = 1, fill = NA) +
+  theme(axis.title.y = element_blank(), 
+        plot.margin = margin(0, 1, 0, 0, "cm"))
+
+sampleplot_highlight <- sampleplot + 
+  annotate("rect", xmin = tf_coords$x1, xmax = tf_coords$x2, ymin = tf_coords$y1, ymax = tf_coords$y2, color = NA, alpha = 0.2, fill = "#FDB863") + 
+  geom_rect(data = tf_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "black", alpha = 1, fill = NA) + 
+  annotate("rect", xmin = nuc_coords$x1, xmax = nuc_coords$x2, ymin = nuc_coords$y1, ymax = nuc_coords$y2, color = NA, alpha = 0.2, fill = "#8073AC") + 
+  geom_rect(data = nuc_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "#8073AC", alpha = 1, fill = NA) +
+  theme(axis.title.y = element_blank())
+
+# gal80_patch <- geneplot / plot_spacer() / controlplot_highlight / sampleplot_highlight + plot_layout(heights = c(1.5, -0.5, 1, 1))
+# gal80_patch
+
+## Plot nuc and TF occupancy changes accompanying the typhoon plot above
+
+sub_mut.df <- subset(master.df, Mutant %in% c("GAL80") & Locus %in% c("GAL1", "GAL10"))[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm")]
+
+melt.df <- melt(sub_mut.df)
+
+melt.df$Locus <- factor(melt.df$Locus, levels = c("GAL10", "GAL1"))
+occupancy_bar <- ggplot(melt.df, aes(x = variable, y = value, fill = variable)) + 
+  geom_bar(color = "black", width = 0.5, stat = "identity") + 
+  geom_hline(yintercept = 0, color = "black") + 
+  scale_fill_manual(values = c("Subnuc_Norm" = "#FDB863", "Nuc_Norm" = "#8073AC")) +
+  scale_x_discrete(labels = c("TF \n Occupancy ∆", "Nuc \n Occupancy ∆")) + 
+  facet_wrap(.~Locus) + 
+  theme_classic() + 
+  theme(legend.position = "none", 
+        panel.grid = element_blank(), 
+        plot.title = element_text(hjust = 0.5, face = "bold.italic"),
+        # panel.border = element_blank(),
+        strip.background = element_blank(), 
+        strip.text = element_text(size = 10, face = "bold.italic"), 
+        axis.text = element_text(color = "black")) + 
+  labs(x = "", y = "log2(FC)") + 
+  coord_flip()
+  
+occupancy_bar
+
+## Add occupancy changes together with typhoon plot
+
+figure_patch <- geneplot / plot_spacer() / controlplot_highlight / plot_spacer() / sampleplot_highlight / occupancy_bar + 
+  plot_layout(heights = c(1, 0.5, 1, 0.5, 1, 1))
+figure_patch
+
+ggsave(figure_patch, filename = "/Users/kmoyung/Desktop/GAL80_detailed_typhoon_figure.png", dpi = 800, width = 6, height = 7)
+```
+
+## Plot an example of TF occupancy change
+
+```{r}
+mut <- "CBF1"
+locus <- "MET10"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+up_offset <- 500
+down_offset <- 1000
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$tss[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+  nuc_start <- coords$tss[1]
+  nuc_end <- coords$tss[1] + 500
+} else {
+  start <- coords$tss[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+  nuc_start <- coords$tss[1] - 500
+  nuc_end <- coords$tss[1]
+}
+
+# Get coordinates for promoter TF and gene body nucleosomes
+nuc_coords <- data.frame(x1 = c(nuc_start), x2 = c(nuc_end), y1 = c(140, 140), y2 = c(200, 200))
+tf_coords <- data.frame(x1 = c(prom_start), x2 = c(prom_end), y1 = c(40), y2 = c(100))
+
+geneplot <- plot_genes(locus, chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end, nuc_coords, tf_coords)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end, nuc_coords, tf_coords)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+
+# Add boxes highlighting TF and nuc occupancy changes
+controlplot_highlight <- controlplot + 
+  annotate("rect", xmin = tf_coords$x1, xmax = tf_coords$x2, ymin = tf_coords$y1, ymax = tf_coords$y2, color = NA, alpha = 0.2, fill = "#FDB863") + 
+  geom_rect(data = tf_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "black", alpha = 1, fill = NA) + 
+  theme(axis.title.y = element_blank(), 
+        plot.margin = margin(0, 1, 0, 0, "cm"), 
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank())
+
+sampleplot_highlight <- sampleplot + 
+  annotate("rect", xmin = tf_coords$x1, xmax = tf_coords$x2, ymin = tf_coords$y1, ymax = tf_coords$y2, color = NA, alpha = 0.2, fill = "#FDB863") + 
+  geom_rect(data = tf_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "black", alpha = 1, fill = NA) + 
+  theme(axis.title.y = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank())
+
+## Plot nuc and TF occupancy changes accompanying the typhoon plot above
+
+sub_mut.df <- subset(master.df, Mutant %in% c(mut) & Locus == locus)[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm")]
+
+melt.df <- melt(sub_mut.df)
+
+occupancy_bar <- ggplot(melt.df, aes(x = variable, y = value, fill = variable)) + 
+  geom_bar(color = "black", width = 0.5, stat = "identity") + 
+  geom_hline(yintercept = 0, color = "black") + 
+  scale_fill_manual(values = c("Subnuc_Norm" = "#FDB863", "Nuc_Norm" = "#8073AC")) +
+  scale_x_discrete(labels = c("TF \n Occupancy ∆", "Nuc \n Occupancy ∆")) + 
+  facet_wrap(.~Locus) + 
+  theme_classic() + 
+  theme(legend.position = "none", 
+        panel.grid = element_blank(), 
+        plot.title = element_text(hjust = 0.5, face = "bold.italic"),
+        # panel.border = element_blank(),
+        strip.background = element_blank(), 
+        strip.text = element_text(size = 10), 
+        axis.text = element_text(color = "black")) + 
+  labs(x = "", y = "Log2FC") + 
+  coord_flip()
+  
+# occupancy_bar
+
+## Add occupancy changes together with typhoon plot
+
+figure_patch <- geneplot / controlplot_highlight / sampleplot_highlight
+figure_patch
+
+ggsave(figure_patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_", paste(locus, collapse = "_"), "_detailed_typhoon_figure.png"), dpi = 800, width = 3, height = 3.5)
+```
+
+## Plot an example of Nuc occupancy change
+
+```{r}
+mut <- "PHO85"
+locus <- "PHO89"
+
+coords <- gene.df[gene.df$alias == locus, c("name", "alias", "tss", "chrom", "strand")]
+chr <- coords$chrom[1]
+strand <- coords$strand[1]
+
+up_offset <- 500
+down_offset <- 1000
+
+if (strand == "+") {
+  start <- coords$tss[1] - up_offset
+  end <- coords$tss[1] + down_offset
+  prom_start <- coords$tss[1] - 250
+  prom_end <- coords$tss[1]
+  nuc_start <- coords$tss[1]
+  nuc_end <- coords$tss[1] + 500
+} else {
+  start <- coords$tss[1] - down_offset
+  end <- coords$tss[1] + up_offset
+  prom_start <- coords$tss[1]
+  prom_end <- coords$tss[1] + 250
+  nuc_start <- coords$tss[1] - 500
+  nuc_end <- coords$tss[1]
+}
+
+# Get coordinates for promoter TF and gene body nucleosomes
+nuc_coords <- data.frame(x1 = c(nuc_start), x2 = c(nuc_end), y1 = c(140, 140), y2 = c(200, 200))
+tf_coords <- data.frame(x1 = c(prom_start), x2 = c(prom_end), y1 = c(40), y2 = c(100))
+
+geneplot <- plot_genes(locus, chr, start, end)
+
+controlplot <- plot_control_typhoon(chr, start, end, mut, prom_start, prom_end, nuc_coords, tf_coords)
+sampleplot <- plot_sample_typhoon(mut, chr, start, end, prom_start, prom_end, nuc_coords, tf_coords)
+
+controlplot <- controlplot + theme(plot.title = element_text(hjust = 0.5), axis.ticks.x = element_blank()) +
+  labs(x = "", title = "Control")
+sampleplot <- sampleplot + theme(plot.title = element_text(hjust = 0.5)) + 
+  ggtitle(paste0(tolower(mut),"\u0394"))
+
+# Add boxes highlighting TF and nuc occupancy changes
+controlplot_highlight <- controlplot + 
+  annotate("rect", xmin = nuc_coords$x1, xmax = nuc_coords$x2, ymin = nuc_coords$y1, ymax = nuc_coords$y2, color = NA, alpha = 0.2, fill = "#8073AC") + 
+  geom_rect(data = nuc_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "#8073AC", alpha = 1, fill = NA) +
+  theme(axis.title.y = element_blank(), 
+        plot.margin = margin(0, 1, 0, 0, "cm"), 
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank())
+
+sampleplot_highlight <- sampleplot + 
+  annotate("rect", xmin = nuc_coords$x1, xmax = nuc_coords$x2, ymin = nuc_coords$y1, ymax = nuc_coords$y2, color = NA, alpha = 0.2, fill = "#8073AC") + 
+  geom_rect(data = nuc_coords, aes(xmin = x1, xmax = x2, ymin = y1, ymax = y2), color = "#8073AC", alpha = 1, fill = NA) +
+  theme(axis.title.y = element_blank(), 
+        axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank())
+
+## Plot nuc and TF occupancy changes accompanying the typhoon plot above
+
+sub_mut.df <- subset(master.df, Mutant %in% c(mut) & Locus == locus)[, c("Mutant", "Locus", "Subnuc_Norm", "Nuc_Norm")]
+
+melt.df <- melt(sub_mut.df)
+
+occupancy_bar <- ggplot(melt.df, aes(x = variable, y = value, fill = variable)) + 
+  geom_bar(color = "black", width = 0.5, stat = "identity") + 
+  geom_hline(yintercept = 0, color = "black") + 
+  scale_fill_manual(values = c("Subnuc_Norm" = "#FDB863", "Nuc_Norm" = "#8073AC")) +
+  scale_x_discrete(labels = c("TF \n Occupancy ∆", "Nuc \n Occupancy ∆")) + 
+  facet_wrap(.~Locus) + 
+  theme_classic() + 
+  theme(legend.position = "none", 
+        panel.grid = element_blank(), 
+        plot.title = element_text(hjust = 0.5, face = "bold.italic"),
+        # panel.border = element_blank(),
+        strip.background = element_blank(), 
+        strip.text = element_text(size = 10), 
+        axis.text = element_text(color = "black")) + 
+  labs(x = "", y = "Log2FC") + 
+  coord_flip()
+  
+# occupancy_bar
+
+## Add occupancy changes together with typhoon plot
+
+figure_patch <- geneplot / controlplot_highlight / sampleplot_highlight
+figure_patch
+
+ggsave(figure_patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_", paste(locus, collapse = "_"), "_detailed_typhoon_figure.png"), dpi = 800, width = 3, height = 3.5)
+```

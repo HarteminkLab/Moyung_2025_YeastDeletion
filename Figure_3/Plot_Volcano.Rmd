@@ -1,0 +1,665 @@
+---
+title: "Plot Volcano Plots with Microarray Data"
+output: html_notebook
+---
+
+```{r}
+library(ggrepel)
+# Source the base code and functions
+if (Sys.info()[['sysname']] == "Windows") {
+  source("C:/Users/Kevin/Desktop/MacAlpine_KM/Code/get_midpoints.R")
+  gene.df = read.csv("D:/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv",header = T)
+} else {
+  gene.df = read.csv("/Users/kmoyung/MacAlpine_KM/HARDAC_scripts/sacCer3_genes_for_making_schematic.csv", header = T)
+  source("/Users/kmoyung/MacAlpine_KM/Code/get_midpoints.R")
+}
+```
+
+Read-in master.df
+
+```{r}
+master.df <- readRDS("/Users/kmoyung/Desktop/master_diff_length_corrected.RDS")
+```
+
+## Plot volcano plot for all mutants stacked into a single plot
+
+```{r}
+# P-value threshold
+p <- 0.005
+# p <- 0.0001
+# Expression threshold
+e <- 0.5
+# Label points based on these thresholds
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    gamma_pvals < p & Microarray_FC >= e ~ "Up",
+    gamma_pvals < p & Microarray_FC <= -e ~ "Down", 
+    gamma_pvals < p & between(Microarray_FC, -e, e) ~ "Chrom", 
+    TRUE ~ "Other"
+  ))
+
+y_end <- 25
+all_volcano <- ggplot(master.df, aes(x = Microarray_FC, y = -log10(gamma_pvals), color = Point_Label, shape = as.factor(hasMotif))) +
+    geom_point() +
+    geom_vline(aes(xintercept = -0.5), lty = 2, lwd = 0.2) +
+    geom_vline(aes(xintercept = 0.5), lty = 2, lwd = 0.2) +
+    geom_hline(aes(yintercept = -log10(p)), lty = 2, lwd = 0.2) +
+    scale_color_manual(breaks = c("Up", "Down", "Chrom", "Other"), values = c("#bf212f", "#264b96", "#006f3c", "grey80"), labels = c("Upregulated + Chrom", "Downregulated + Chrom", "Chrom", "Other")) +
+    theme_bw() +
+    theme(legend.position = "none", 
+          panel.grid = element_blank(),
+          plot.title = element_text(hjust = 0.5)) +
+    labs(y = "Chromatin -log10(p)", x = "Expression log2(FC)", title = "Preliminary Cutoff (p < 0.005)", color = "", 
+       shape = "Motif") +
+    scale_shape_manual(labels = c("No", "Yes"), values = c(16, 17)) +
+    coord_cartesian(xlim = c(-4, 4), ylim = c(0, y_end), expand = c(0,0)) + 
+    annotate("rect", xmin = -4, xmax = -e, ymin = 0, ymax = y_end, fill = "#264b96", alpha = 0.1, color = NA) + 
+    annotate("rect", xmin = e, xmax = 4, ymin = 0, ymax = y_end, fill = "#bf212f", alpha = 0.1, color = NA) + 
+    annotate("rect", xmin = -e, xmax = e, ymin = 0, ymax = y_end, fill = "#006f3c", alpha = 0.1, color = NA) + 
+    annotate("rect", xmin = -4, xmax = 4, ymin = 0, ymax = -log10(p), fill = "grey80", alpha = 0.1, color = NA)
+all_volcano
+```
+
+Add a laplacian curve as cutoff
+
+```{r}
+# Define the Laplace probability density function (PDF) with a scaling factor
+laplace_pdf <- function(x, mu, b, peak) {
+  return(peak * (1/(2*b) * exp(-abs(x - mu)/b)))
+}
+
+# Create a separate dataframe with the general x and y values
+x <- c(-4, -3, -1, 0, 1, 3, 4)
+y <- c(0, 0, 2.5, 10, 2.5, 0, 0)
+df <- data.frame(x, y)
+
+# Generate points for plotting the fitted curve
+scale_factor <- 19
+beta <- 1
+# curve_data <- data.frame(x = seq(min(df$x), max(df$x), length.out = 101))
+curve_data <- data.frame(x = seq(min(df$x), max(df$x), length.out = 33))
+curve_data$y <- laplace_pdf(curve_data$x, 0, beta, scale_factor)
+
+all_volcano_curve <- all_volcano +
+  geom_line(data = curve_data, aes(x = x, y = y), inherit.aes = F, linetype = "dashed", linewidth = 0.2)
+all_volcano_curve
+
+# Important: Add a closed-form boundary to the laplacian curve (to determine if points fall inside the polygon or not)
+curve_data <- rbind(c(-5, 0), curve_data, c(5, 0))
+```
+
+## Determine cutoff based on the defined laplacian curve
+
+```{r}
+library(sp)
+
+# Label points based on these thresholds
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC >= e ~ "Up",
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC <= -e ~ "Down", 
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & between(Microarray_FC, -e, e) ~ "Chrom", 
+    TRUE ~ "Other"
+  ))
+
+# Calculate coordinates to fill the up, down, and chrom regions based on the cutoff
+down_poly <- rbind(c(-4, y_end), subset(curve_data, x >= -4 & x <= -e), c(-e, y_end))
+chrom_poly <- rbind(c(-e, y_end), subset(curve_data, x >= -e & x <= e), c(e, y_end))
+up_poly <- rbind(c(e, y_end), subset(curve_data, x >= e & x <= 4), c(4, y_end))
+
+all_volcano_cutoff <- ggplot(master.df, aes(x = Microarray_FC, y = -log10(gamma_pvals), color = Point_Label, shape = as.factor(hasMotif))) +
+  geom_point() +
+  geom_vline(aes(xintercept = -0.5), lty = 2, lwd = 0.2) +
+  geom_vline(aes(xintercept = 0.5), lty = 2, lwd = 0.2) +
+  scale_color_manual(breaks = c("Up", "Down", "Chrom", "Other"), values = c("#bf212f", "#264b96", "#006f3c", "grey80"), labels = c("Upregulated + Chrom", "Downregulated + Chrom", "Chrom", "Other")) +
+  theme_bw() +
+  theme(legend.position = "none", 
+        panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5), 
+        axis.text = element_text(size = 10)) +
+  labs(y = expression(Chromatin~-log[10]~(p)), x = expression(Expression~log[2]~(FC)), title = "All Mutants", color = "", 
+       shape = "Motif") +
+  scale_shape_manual(labels = c("No", "Yes"), values = c(16, 17)) +
+  coord_cartesian(xlim = c(-4, 4), ylim = c(0, y_end), expand = c(0,0)) + 
+  geom_polygon(data = down_poly, aes(x, y), fill = "#264b96", alpha = 0.1, color = NA, inherit.aes = F) +  
+  geom_polygon(data = up_poly, aes(x, y), fill = "#bf212f", alpha = 0.1, color = NA, inherit.aes = F) +  
+  geom_polygon(data = chrom_poly, aes(x, y), fill = "#006f3c", alpha = 0.1, color = NA, inherit.aes = F) +
+  geom_polygon(data = curve_data, aes(x, y), fill = "grey80", alpha = 0.1, color = NA, inherit.aes = F) +  
+  geom_line(data = curve_data, aes(x = x, y = y), inherit.aes = F, linetype = "dashed", linewidth = 0.2)
+all_volcano_cutoff
+
+# Plot a hexbin version of the above volcanoplot
+all_volcano_cutoff_bin <- ggplot(master.df, aes(x = Microarray_FC, y = -log10(gamma_pvals), color = Point_Label, shape = as.factor(hasMotif))) +
+  geom_hex(bins = 100, aes(fill = log(after_stat(count))), color = NA) + 
+  # scale_fill_continuous(type = "viridis", limits = c(0, 1000), oob = scales::squish, breaks = c(0, 250, 500, 700, 1000), 
+  #                       labels = c("0", "250", "500", "700", "> 1000")) +
+  scale_fill_continuous(type = "viridis") + 
+  geom_vline(aes(xintercept = -0.5), lty = 2, lwd = 0.2) +
+  geom_vline(aes(xintercept = 0.5), lty = 2, lwd = 0.2) +
+  scale_color_manual(breaks = c("Up", "Down", "Chrom", "Other"), values = c("#bf212f", "#264b96", "#006f3c", "grey80"), labels = c("Upregulated + Chrom", "Downregulated + Chrom", "Chrom", "Other")) +
+  theme_bw() +
+  theme(panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5)) +
+  labs(y = "Chromatin -log10(p)", x = "Expression log2(FC)", title = "All Mutants", color = "", 
+       shape = "Motif") +
+  scale_shape_manual(labels = c("No", "Yes"), values = c(16, 17)) +
+  coord_cartesian(xlim = c(-4, 4), ylim = c(0, y_end), expand = c(0,0)) + 
+  geom_polygon(data = down_poly, aes(x, y), fill = "#264b96", alpha = 0.1, color = NA, inherit.aes = F) +  
+  geom_polygon(data = up_poly, aes(x, y), fill = "#bf212f", alpha = 0.1, color = NA, inherit.aes = F) +  
+  geom_polygon(data = chrom_poly, aes(x, y), fill = "#006f3c", alpha = 0.1, color = NA, inherit.aes = F) +
+  geom_polygon(data = curve_data, aes(x, y), fill = "grey80", alpha = 0.1, color = NA, inherit.aes = F) +  
+  geom_line(data = curve_data, aes(x = x, y = y), inherit.aes = F, linetype = "dashed", linewidth = 0.2)
+all_volcano_cutoff_bin
+
+
+# Test: Add histograms to show distribution on the margins
+# expr_hist <- ggplot(master.df, aes(x = Microarray_FC)) + 
+#   geom_histogram(bins = 100) + 
+#   theme_bw() + 
+#   coord_cartesian(xlim = c(-4, 4), expand = c(0,0))
+# 
+# chrom_hist <- ggplot(master.df, aes(x = -log10(gamma_pvals))) + 
+#   geom_histogram(bins = 100) + 
+#   theme_bw() + 
+#   coord_cartesian(xlim = c(0, y_end), expand = c(0,0)) + 
+#   coord_flip()
+# 
+# expr_hist / all_volcano_cutoff
+
+# Count total number of interactions
+count.df <- data.frame(table(master.df$Point_Label))
+count.df <- subset(count.df, Var1 != "Other")
+
+# Calculate the % of total significant interactions
+n_total <- sum(count.df$Freq)
+count.df$Pct <- round(count.df$Freq / n_total * 100)
+
+# Barplot version
+countplot <- ggplot(subset(count.df, Var1 %in% c("Up", "Down", "Chrom")), aes(x = Var1, y = Freq, fill = Var1)) + 
+  geom_bar(stat = "identity", color = "black", width = 0.5) + 
+  geom_text(stat = "identity", aes(label = paste0("n = ", Freq)), color = "white", hjust = 1.2, size = 3) + 
+  scale_fill_manual(breaks = c("Up", "Down", "Chrom"), values = c("#bf212f", "#264b96", "#006f3c"), labels = c("Upregulated", "Downregulated", "Low Diff. Expression")) + 
+  theme_classic() + 
+  theme(panel.grid = element_blank(), 
+        panel.border = element_blank(), 
+        panel.background = element_blank(), 
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        axis.text.y = element_blank()) + 
+  labs(x = NULL, y = "# of Significant Interactions", fill = "") + 
+  coord_flip()
+  
+
+countplot
+```
+
+## Plot succession of plots of all mutants stacked together
+
+```{r}
+# patch <- all_volcano + all_volcano_curve + all_volcano_cutoff
+# ggsave(patch, filename = "/Users/kmoyung/supp_figures/all_mutant_volcano_cutoffs.png", dpi = 800, width = 9, height = 3)
+```
+
+## Compare the two cutoffs (straight p-value vs. laplacian)
+
+```{r}
+patch <- all_volcano / all_volcano_cutoff
+patch
+
+ggsave(patch, filename = "/Users/kmoyung/supp_figures/all_mutant_volcano_cutoffs.png", dpi = 800, width = 3, height = 6)
+```
+
+## Plot volcano plot for a single mutant (try various aesthetics)
+
+```{r}
+mut <- "CBF1"
+
+y_end <- 25
+
+# Calculate coordinates to fill the up, down, and chrom regions based on the cutoff
+down_poly <- rbind(c(-4, y_end), subset(curve_data, x >= -4 & x <= -e), c(-e, y_end))
+chrom_poly <- rbind(c(-e, y_end), subset(curve_data, x >= -e & x <= e), c(e, y_end))
+up_poly <- rbind(c(e, y_end), subset(curve_data, x >= e & x <= 4), c(4, y_end))
+
+ggplot(subset(master.df, Mutant == mut), aes(x = Microarray_FC, y = -log10(gamma_pvals), color = Point_Label, shape = as.factor(hasMotif))) +
+  geom_point() +
+  geom_vline(aes(xintercept = -0.5), lty = 2, lwd = 0.2) +
+  geom_vline(aes(xintercept = 0.5), lty = 2, lwd = 0.2) +
+  scale_color_manual(breaks = c("Up", "Down", "Chrom", "Other"), values = c("#bf212f", "#264b96", "#006f3c", "grey80"), labels = c("Upregulated + Chrom", "Downregulated + Chrom", "Chrom", "Other")) +
+  theme_bw() +
+  geom_label_repel(data = subset(master.df, Mutant == mut & gamma_pvals < p & Point_Label %in% c("Up")), aes(x = Microarray_FC, y = -log10(gamma_pvals), label = Locus), label.padding = 0.1, show.legend = F, label.size = NA, fill = NA, max.overlaps = Inf, force = 4, size = 2.75, ylim = c(-log10(p), NA), xlim = c(2, NA), segment.size = 0.2, min.segment.length = 0) +
+   geom_label_repel(data = subset(master.df, Mutant == mut & gamma_pvals < p & Point_Label %in% c("Down")), aes(x = Microarray_FC, y = -log10(gamma_pvals), label = Locus), label.padding = 0.1, show.legend = F, label.size = NA, fill = NA, max.overlaps = Inf, force = 4, size = 2.75, ylim = c(-log10(p), NA), xlim = c(NA, -2), segment.size = 0.2) +
+  theme(legend.position = "none", 
+        panel.grid = element_blank(),
+        plot.title = element_text(hjust = 0.5, face = "italic")) +
+  labs(y = "", x = "", title = paste0(tolower(mut), "\u0394"), color = "", 
+       shape = "Motif") +
+  scale_shape_manual(labels = c("No", "Yes"), values = c(16, 17)) +
+  coord_cartesian(xlim = c(-4, 4), ylim = c(0, y_end), expand = c(0,0)) + 
+  geom_polygon(data = down_poly, aes(x, y), fill = "#264b96", alpha = 0.1, color = NA, inherit.aes = F) +  
+  geom_polygon(data = up_poly, aes(x, y), fill = "#bf212f", alpha = 0.1, color = NA, inherit.aes = F) +  
+  geom_polygon(data = chrom_poly, aes(x, y), fill = "#006f3c", alpha = 0.1, color = NA, inherit.aes = F) +
+  geom_polygon(data = curve_data, aes(x, y), fill = "grey80", alpha = 0.1, color = NA, inherit.aes = F) +  
+  geom_line(data = curve_data, aes(x = x, y = y), inherit.aes = F, linetype = "dashed", linewidth = 0.2) 
+```
+
+
+## Plot original js volcano plots and label points based on pval cutoff for all mutants
+
+```{r}
+library(ggrepel)
+library(ggpointdensity)
+selected_muts <- unique(master.df$Mutant)
+
+# P-value threshold
+p <- 0.005
+# p <- 0.0001
+# Expression threshold
+e <- 0.5
+# Label points based on the laplacian cutoff
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC >= e ~ "Up",
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC <= -e ~ "Down", 
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & between(Microarray_FC, -e, e) ~ "Chrom", 
+    TRUE ~ "Other"
+  ))
+
+# Store y limit
+y_end <- 25
+
+# Calculate coordinates to fill the up, down, and chrom regions based on the cutoff
+down_poly <- rbind(c(-4, y_end), subset(curve_data, x >= -4 & x <= -e), c(-e, y_end))
+chrom_poly <- rbind(c(-e, y_end), subset(curve_data, x >= -e & x <= e), c(e, y_end))
+up_poly <- rbind(c(e, y_end), subset(curve_data, x >= e & x <= 4), c(4, y_end))
+
+for (mut in selected_muts) {
+   js_volcano_orig <- ggplot(subset(master.df, Mutant == mut), aes(x = Microarray_FC, y = -log10(gamma_pvals), color = Point_Label, shape = as.factor(hasMotif))) +
+    geom_point() +
+    geom_vline(aes(xintercept = -0.5), lty = 2, lwd = 0.2) +
+    geom_vline(aes(xintercept = 0.5), lty = 2, lwd = 0.2) +
+    scale_color_manual(breaks = c("Up", "Down", "Chrom", "Other"), values = c("#bf212f", "#264b96", "#006f3c", "grey80"), labels = c("Upregulated + Chrom", "Downregulated + Chrom", "Chrom", "Other")) +
+    theme_bw() +
+    geom_label_repel(data = subset(master.df, Mutant == mut & gamma_pvals < p & Point_Label %in% c("Up", "Down", "Chrom")), aes(x = Microarray_FC, y = -log10(gamma_pvals), label = Locus), label.padding = 0.1, show.legend = F, label.size = NA, fill = NA, max.overlaps = 20, force = 4, size = 2.75) +
+    theme(legend.position = "none", 
+          panel.grid = element_blank(),
+          plot.title = element_text(hjust = 0.5, face = "italic")) +
+    labs(y = "Chromatin -log10(p)", x = "Expression ∆ -log2(FC)", title = paste0(tolower(mut), "\u0394"), color = "", 
+         shape = "Motif") +
+    scale_shape_manual(labels = c("No", "Yes"), values = c(16, 17)) +
+    coord_cartesian(xlim = c(-4, 4), ylim = c(0, y_end), expand = c(0,0)) + 
+    geom_polygon(data = down_poly, aes(x, y), fill = "#264b96", alpha = 0.1, color = NA, inherit.aes = F) +  
+    geom_polygon(data = up_poly, aes(x, y), fill = "#bf212f", alpha = 0.1, color = NA, inherit.aes = F) +  
+    geom_polygon(data = chrom_poly, aes(x, y), fill = "#006f3c", alpha = 0.1, color = NA, inherit.aes = F) +  
+    geom_polygon(data = curve_data, aes(x, y), fill = "grey80", alpha = 0.1, color = NA, inherit.aes = F) +  
+    geom_line(data = curve_data, aes(x = x, y = y), inherit.aes = F, linetype = "dashed", linewidth = 0.2) 
+   
+  patch <- js_volcano_orig + plot_layout(guides = "collect")
+  ggsave(patch, filename = paste0("/Users/kmoyung/volcano_plots/gamma_pval_volcano_plots/", mut, "_js_volcano.png"), width = 4, height = 4, dpi = 800)
+}
+```
+
+Find best examples based on # of overlapping up/downregulated interactions per mutant
+
+```{r}
+n_sig.df <- master.df %>%
+  filter(Point_Label %in% c("Up", "Down")) %>%
+  group_by(Mutant) %>%
+  summarize(N = n())
+```
+
+Plot best volcano plots
+
+```{r}
+library(ggrepel)
+library(ggpointdensity)
+# selected_muts <- c("GAL80", "ARG81", "PHO85", "BAS1", "PPR1", "CBF1", "RFX1", "ROX1", "SWI6")
+selected_muts <- c("GAL80", "ARG81", "PHO85", "BAS1", "PPR1", "CBF1")
+
+# Label selected genes in the manuscript
+selected_loci <- c("GAL1", "GAL10", "GAL2", "ARG8", "ARG5,6", "ADE17", "HIS4", "SHM2", "GCV1", "GCV2", "GCV3",
+                   "PHO8", "PHO81", "PHO89", "CWC21", "KRE2", "MET3", "MET10")
+
+# P-value threshold
+p <- 0.005
+# p <- 0.0001
+# Expression threshold
+e <- 0.5
+# Label points based on the laplacian cutoff
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC >= e ~ "Up",
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC <= -e ~ "Down", 
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & between(Microarray_FC, -e, e) ~ "Chrom", 
+    TRUE ~ "Other"
+  ))
+
+# Store y limit
+y_end <- 25
+
+# Calculate coordinates to fill the up, down, and chrom regions based on the cutoff
+down_poly <- rbind(c(-4, y_end), subset(curve_data, x >= -4 & x <= -e), c(-e, y_end))
+chrom_poly <- rbind(c(-e, y_end), subset(curve_data, x >= -e & x <= e), c(e, y_end))
+up_poly <- rbind(c(e, y_end), subset(curve_data, x >= e & x <= 4), c(4, y_end))
+
+js_volcanoes <- list()
+for (mut in selected_muts) {
+   js_volcanoes[[mut]] <- ggplot(subset(master.df, Mutant == mut), aes(x = Microarray_FC, y = -log10(gamma_pvals), color = Point_Label, shape = as.factor(hasMotif))) +
+    geom_point() +
+    geom_vline(aes(xintercept = -0.5), lty = 2, lwd = 0.2) +
+    geom_vline(aes(xintercept = 0.5), lty = 2, lwd = 0.2) +
+    scale_color_manual(breaks = c("Up", "Down", "Chrom", "Other"), values = c("#bf212f", "#264b96", "#006f3c", "grey80"), labels = c("Upregulated + Chrom", "Downregulated + Chrom", "Chrom", "Other")) +
+    theme_bw() +
+    geom_label_repel(data = subset(master.df, Mutant == mut & Locus %in% selected_loci & Point_Label %in% c("Up", "Down", "Chrom")), aes(x = Microarray_FC, y = -log10(gamma_pvals), label = Locus), label.padding = 0.1, show.legend = F, label.size = NA, fill = NA, max.overlaps = Inf, force = 4, size = 3, ylim = c(5, NA), segment.size = 0.1, fontface = "italic") +
+    #  geom_label_repel(data = subset(master.df, Mutant == mut & gamma_pvals < p & Point_Label %in% c("Down")), aes(x = Microarray_FC, y = -log10(gamma_pvals), label = Locus), label.padding = 0.1, show.legend = F, label.size = NA, fill = NA, max.overlaps = Inf, force = 4, size = 2.25, ylim = c(NA, NA), xlim = c(NA, -2), segment.size = 0.1) +
+    theme(legend.position = "none", 
+          panel.grid = element_blank(),
+          plot.title = element_text(hjust = 0.5, face = "italic"), 
+          axis.text = element_text(size = 10)) +
+    # labs(y = "Chromatin -log10(p)", x = "Expression log2(FC)", title = paste0(tolower(mut), "\u0394"), color = "", 
+    #      shape = "Motif") +
+     labs(y = expression(Chromatin~-log[10]~(p)), x = expression(Expression~log[2]~(FC)), title = paste0(tolower(mut), "\u0394"), color = "", 
+         shape = "Motif") + 
+    scale_shape_manual(labels = c("No", "Yes"), values = c(16, 17)) +
+    coord_cartesian(xlim = c(-4, 4), ylim = c(0, y_end), expand = c(0,0)) + 
+    geom_polygon(data = down_poly, aes(x, y), fill = "#264b96", alpha = 0.1, color = NA, inherit.aes = F) +  
+    geom_polygon(data = up_poly, aes(x, y), fill = "#bf212f", alpha = 0.1, color = NA, inherit.aes = F) +  
+    geom_polygon(data = chrom_poly, aes(x, y), fill = "#006f3c", alpha = 0.1, color = NA, inherit.aes = F) +  
+    geom_polygon(data = curve_data, aes(x, y), fill = "grey80", alpha = 0.1, color = NA, inherit.aes = F) +  
+    geom_line(data = curve_data, aes(x = x, y = y), inherit.aes = F, linetype = "dashed", linewidth = 0.2) 
+}
+
+# Add "plot" for global y-axis
+yaxis <- ggplot(data.frame(l = "Chromatin -log10(p)", x = 1, y = 1)) +
+      geom_text(aes(x, y, label = l), angle = 90) + 
+      theme_void() +
+      coord_cartesian(clip = "off")
+
+# Add global x-axis (doesn't work)
+xaxis <- ggplot(data.frame(l = "Expression log2(FC)", x = 1, y = 1)) +
+      geom_text(aes(x, y, label = l)) +
+      theme_void() +
+      coord_cartesian(clip = "off")
+
+patch <- yaxis + wrap_plots(js_volcanoes, ncol = 3, nrow = 3) + plot_layout(guides = "collect", widths = c(1, 25))
+ggsave(patch, filename = paste0("/Users/kmoyung/volcano_plots/panels/selected_panel_6_yaxis_nolab_new.png"), 
+         dpi = 800, width = 7.5, height = 7.5)
+
+patch <- wrap_plots(js_volcanoes, ncol = 3, nrow = 3) / xaxis + plot_layout(guides = "collect", heights = c(25, 1))
+ggsave(patch, filename = paste0("/Users/kmoyung/volcano_plots/panels/selected_panel_6_xaxis_nolab_new.png"), 
+         dpi = 800, width = 7.5, height = 7.5)
+
+```
+
+## Patch the selected panel, stacked volcano, and the barplot together
+
+```{r}
+# design <- "abc \n def \n ghi \n jkl"
+
+volcano_patch <- all_volcano_cutoff + countplot + guide_area() + js_volcanoes[1] + js_volcanoes[2] +
+  js_volcanoes[3] + js_volcanoes[4] + js_volcanoes[5] + js_volcanoes[6] + plot_layout(guides = 'collect', ncol = 3, nrow = 3)
+
+volcano_patch
+
+ggsave(volcano_patch, filename = "/Users/kmoyung/Desktop/volcano_plot_figure_new.png", dpi = 800, width = 6, height = 6)
+```
+
+
+## Quantify the number of chromatin, chromatin+up/down, and up/down regulations there are
+
+Count and sum all of these interactions across all mutants
+
+```{r}
+# P-value thresholds
+# p <- 0.005
+# Expression threshold
+e <- 0.5
+# Label points based on the laplacian cutoff
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC >= e ~ "Up",
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & Microarray_FC <= -e ~ "Down", 
+    sp::point.in.polygon(Microarray_FC, -log10(gamma_pvals), curve_data$x, curve_data$y) == 0 & between(Microarray_FC, -e, e) ~ "Chrom", 
+    TRUE ~ "Other"
+  ))
+
+# Filter out mutants with no significant expression+chromatin changes; we call these "unresponsive" mutants
+sub_master.df <- master.df %>%
+  group_by(Mutant) %>%
+  filter(!all(Point_Label %in% c("Other", "Chrom")))
+
+count.df <- data.frame(table(sub_master.df$Point_Label))
+count.df <- subset(count.df, Var1 != "Other")
+
+# Calculate the % of total significant interactions
+n_total <- sum(count.df$Freq)
+count.df$Pct <- round(count.df$Freq / n_total * 100)
+
+# Barplot version
+countplot <- ggplot(subset(count.df, Var1 %in% c("Up", "Down", "Chrom")), aes(x = Var1, y = Freq, fill = Var1)) + 
+  geom_bar(stat = "identity", color = "black", width = 0.75) + 
+  geom_text(stat = "identity", aes(label = Freq), color = "white", hjust = 1.5) + 
+  scale_fill_manual(breaks = c("Up", "Down", "Chrom"), values = c("#bf212f", "#264b96", "#006f3c"), labels = c("Upregulated", "Downregulated", "Low/No Expression Change")) + 
+  theme_classic() + 
+  theme(panel.grid = element_blank(), 
+        panel.border = element_blank(), 
+        panel.background = element_blank(), 
+        aspect.ratio = 1/2, 
+        axis.text.x = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = "right", 
+        axis.text.y = element_blank()) + 
+  labs(x = NULL, y = "# of Significant Interactions", fill = "") + 
+  coord_flip()
+  
+
+countplot
+ggsave(countplot, filename = "/Users/kmoyung/Desktop/volcano_counts_responsive.png", dpi = 800, width = 5, height = 3)
+  
+```
+
+Plot the above but observe different p-value cutoffs
+
+```{r}
+# P-value thresholds
+p_vals <- c(0.05, 0.01, 0.005, 0.001, 0.0005, 0.0001)
+# Expression threshold
+e <- 0.5
+
+barplots <- list()
+for (i in 1:length(p_vals)) {
+  p <- p_vals[i]
+  # Label points based on these thresholds
+  master.df <- master.df %>%
+    mutate(Point_Label = case_when(
+      gamma_pvals < p & Microarray_FC >= e ~ "Up + Chrom",
+      gamma_pvals < p & Microarray_FC <= -e ~ "Down + Chrom", 
+      gamma_pvals < p & between(Microarray_FC, -e, e) ~ "Chrom", 
+      TRUE ~ "Other"
+    ))
+  
+  # Filter out mutants with no significant expression+chromatin changes; we call these "unresponsive" mutants
+  sub_master.df <- master.df %>%
+    group_by(Mutant) %>%
+    filter(!all(Point_Label %in% c("Other", "Chrom")))
+  
+  count.df <- data.frame(table(sub_master.df$Point_Label))
+  count.df <- subset(count.df, Var1 != "Other")
+  
+  # Calculate the % of total significant interactions
+  n_total <- sum(count.df$Freq)
+  count.df$Pct <- round(count.df$Freq / n_total * 100)
+  
+  # Barplot version
+  barplots[[i]] <- ggplot(subset(count.df, Var1 %in% c("Up + Chrom", "Down + Chrom", "Chrom")), aes(x = Var1, y = Freq, fill = Var1)) + 
+    geom_bar(stat = "identity", color = "black", width = 0.75) + 
+    geom_text(data = subset(count.df, Var1 %in% c("Chrom")), stat = "identity", aes(label = Freq), color = "white", hjust = 1.5) +
+    geom_text(data = subset(count.df, Var1 %in% c("Up + Chrom", "Down + Chrom")), stat = "identity", aes(label = Freq), color = "black", hjust = -1.5) +
+    scale_fill_manual(breaks = c("Up + Chrom", "Down + Chrom", "Chrom"), values = c("#bf212f", "#264b96", "#006f3c"), labels = c("Upregulated", "Downregulated", "Low/No Expression Change")) + 
+    theme_classic() + 
+    theme(panel.grid = element_blank(), 
+          panel.border = element_blank(), 
+          panel.background = element_blank(), 
+          aspect.ratio = 1/2, 
+          # axis.text.x = element_text(angle = 75, hjust = 1, color = "black"), 
+          legend.position = "right", 
+          axis.text.y = element_text(color = "black")) + 
+    labs(x = NULL, y = "# of Significant Interactions", fill = "", title = paste0("p < ", p)) + 
+    coord_flip()
+    
+  # ggsave(countplot, filename = paste0("/Users/kmoyung/Desktop/volcano_counts_", i,".png"), dpi = 800, width = 5, height = 3)
+}
+
+countplot <- wrap_plots(barplots) + plot_layout(guides = "collect")
+
+ggsave(countplot, filename = paste0("/Users/kmoyung/Desktop/volcano_counts_various.png"), dpi = 800, width = 12, height = 8)
+```
+
+
+## Plot same volcanoes as above but using the old lnorm p-values and cutoffs
+
+```{r}
+# P-value threshold
+p <- 0.0005
+# p <- 0.0001
+# Expression threshold
+e <- 0.5
+# Label points based on these thresholds
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    lnorm_pvals < p & Microarray_FC >= e ~ "Up",
+    lnorm_pvals < p & Microarray_FC <= -e ~ "Down", 
+    lnorm_pvals < p & between(Microarray_FC, -e, e) ~ "Chrom", 
+    TRUE ~ "Other"
+  ))
+
+# Store y limit
+y_end <- 15
+
+js_volcanoes_old <- list()
+for (mut in selected_muts) {
+   js_volcanoes_old[[mut]] <- ggplot(subset(master.df, Mutant == mut), aes(x = Microarray_FC, y = -log10(lnorm_pvals), color = Point_Label, shape = as.factor(hasMotif))) +
+    geom_point() +
+    geom_vline(aes(xintercept = -0.5), lty = 2, lwd = 0.2) +
+    geom_vline(aes(xintercept = 0.5), lty = 2, lwd = 0.2) +
+    geom_hline(aes(yintercept = -log10(p)), lty = 2, lwd = 0.2) + 
+    scale_color_manual(breaks = c("Up", "Down", "Chrom", "Other"), values = c("#bf212f", "#264b96", "#006f3c", "grey80"), labels = c("Upregulated + Chrom", "Downregulated + Chrom", "Chrom", "Other")) +
+    theme_bw() +
+    # geom_label_repel(data = subset(master.df, Mutant == mut & gamma_pvals < p & Point_Label %in% c("Up")), aes(x = Microarray_FC, y = -log10(gamma_pvals), label = Locus), label.padding = 0.1, show.legend = F, label.size = NA, fill = NA, max.overlaps = Inf, force = 4, size = 2.25, ylim = c(NA, NA), xlim = c(2, NA), segment.size = 0.1) +
+    #  geom_label_repel(data = subset(master.df, Mutant == mut & gamma_pvals < p & Point_Label %in% c("Down")), aes(x = Microarray_FC, y = -log10(gamma_pvals), label = Locus), label.padding = 0.1, show.legend = F, label.size = NA, fill = NA, max.overlaps = Inf, force = 4, size = 2.25, ylim = c(NA, NA), xlim = c(NA, -2), segment.size = 0.1) +
+    theme(legend.position = "none", 
+          panel.grid = element_blank(),
+          plot.title = element_text(hjust = 0.5, face = "italic")) +
+    labs(y = "", x = "", title = paste0(tolower(mut), "\u0394"), color = "", 
+         shape = "Motif") +
+    scale_shape_manual(labels = c("No", "Yes"), values = c(16, 17)) +
+    coord_cartesian(xlim = c(-4, 4), ylim = c(0, y_end), expand = c(0,0)) + 
+    annotate("rect", xmin = -4, xmax = -e, ymin = -log10(p), ymax = y_end, fill = "#264b96", alpha = 0.1, color = NA) + 
+    annotate("rect", xmin = e, xmax = 4, ymin = -log10(p), ymax = y_end, fill = "#bf212f", alpha = 0.1, color = NA) + 
+    annotate("rect", xmin = -e, xmax = e, ymin = -log10(p), ymax = y_end, fill = "#006f3c", alpha = 0.1, color = NA) +
+    annotate("rect", xmin = -4, xmax = 4, ymin = 0, ymax = -log10(p), fill = "grey80", alpha = 0.1, color = NA)
+}
+
+# Add "plot" for global y-axis
+yaxis <- ggplot(data.frame(l = "Chromatin -log10(p)", x = 1, y = 1)) +
+      geom_text(aes(x, y, label = l), angle = 90) + 
+      theme_void() +
+      coord_cartesian(clip = "off")
+
+# Add global x-axis (doesn't work)
+xaxis <- ggplot(data.frame(l = "Expression log2(FC)", x = 1, y = 1)) +
+      geom_text(aes(x, y, label = l)) +
+      theme_void() +
+      coord_cartesian(clip = "off")
+
+patch <- yaxis + wrap_plots(js_volcanoes_old, ncol = 3, nrow = 3) + plot_layout(guides = "collect", widths = c(1, 25))
+ggsave(patch, filename = paste0("/Users/kmoyung/volcano_plots/panels/old_selected_panel_6_yaxis_nolab.png"), 
+         dpi = 800, width = 7.5, height = 7.5)
+
+patch <- wrap_plots(js_volcanoes_old, ncol = 3, nrow = 3) / xaxis + plot_layout(guides = "collect", heights = c(25, 1))
+ggsave(patch, filename = paste0("/Users/kmoyung/volcano_plots/panels/old_selected_panel_6_xaxis_nolab.png"), 
+         dpi = 800, width = 7.5, height = 7.5)
+```
+
+## Compare JS divergences between up/down+chromatin and chromatin alone
+
+```{r}
+my_comparisons <- list(c(1, 2), c(1, 4), c(2, 4))
+js_by_labels <- ggplot(sub_master.df, aes(x = Point_Label, y = -log10(lnorm_pvals), fill = Point_Label)) + 
+  geom_boxplot(outlier.alpha = 0) + 
+  # ggpubr::stat_compare_means(method = "wilcox.test", comparisons = my_comparisons) +
+  scale_fill_manual(breaks = c("Up + Chrom", "Down + Chrom", "Chrom", "Other"), values = c("#bf212f", "#264b96", "#006f3c", "grey70"), labels = c("Upreg. + Chrom.", "Downreg. + Chrom.", "Chrom. Only", "Other")) + 
+  theme_bw() + 
+  labs(x = "", fill = "Label", y = "-log10(Chromatin P-Value)") + 
+  theme(axis.text.x = element_text(angle = 70, hjust = 1, color = "black"), 
+        axis.text.y = element_text(color = "black")) + 
+  ylim(0, 10)
+
+js_by_labels
+ggsave(js_by_labels, filename = "/Users/kmoyung/Desktop/js_by_labels.png", dpi = 800, width = 4, height = 4)
+```
+## Plot volcano plot of individual mutant
+
+```{r}
+mut <- "STP2"
+
+# P-value threshold
+p <- 0.0005
+# p <- 0.0001
+# Expression threshold
+e <- 0.5
+# Label points based on these thresholds
+master.df <- master.df %>%
+  mutate(Point_Label = case_when(
+    lnorm_pvals < p & Microarray_FC >= e ~ "Up",
+    lnorm_pvals < p & Microarray_FC <= -e ~ "Down", 
+    lnorm_pvals < p & between(Microarray_FC, -e, e) ~ "Chrom", 
+    TRUE ~ "Other"
+  ))
+
+window_js_volcano <- ggplot(subset(master.df, Mutant == mut), aes(x = Microarray_FC, y = -log10(lnorm_pvals), color = Point_Label, shape = as.factor(hasMotif))) +
+    geom_point() +
+    geom_vline(aes(xintercept = -0.5), lty = 2, lwd = 0.2) +
+    geom_vline(aes(xintercept = 0.5), lty = 2, lwd = 0.2) +
+    geom_hline(aes(yintercept = -log10(p)), lty = 2, lwd = 0.2) + 
+    scale_color_manual(breaks = c("Up", "Down", "Chrom", "Other"), values = c("#bf212f", "#264b96", "#006f3c", "grey80"), labels = c("Upregulated + Chrom", "Downregulated + Chrom", "Chrom", "Other")) +
+    theme_bw() +
+    geom_label_repel(data = subset(master.df, Mutant == mut & lnorm_pvals < p), aes(x = Microarray_FC, y = -log10(lnorm_pvals), label = Locus), label.padding = 0.1, show.legend = F, label.size = NA, fill = NA, max.overlaps = 15, force = 4, size = 2.75) +
+    theme(legend.position = "none", 
+          panel.grid = element_blank(),
+          plot.title = element_text(hjust = 0.5, face = "italic")) +
+    labs(y = "Promoter + Gene Chromatin Change", x = "Expression log2FC", title = paste0(tolower(mut), "\u0394"), color = "", 
+         shape = "Motif") +
+    scale_shape_manual(labels = c("No", "Yes"), values = c(16, 17)) +
+    coord_cartesian(xlim = c(-4, 4), ylim = c(0, 14), expand = c(0,0)) + 
+    annotate("rect", xmin = -4, xmax = -e, ymin = -log10(p), ymax = 14, fill = "#264b96", alpha = 0.1, color = NA) + 
+    annotate("rect", xmin = e, xmax = 4, ymin = -log10(p), ymax = 14, fill = "#bf212f", alpha = 0.1, color = NA) + 
+    annotate("rect", xmin = -e, xmax = e, ymin = -log10(p), ymax = 14, fill = "#006f3c", alpha = 0.1, color = NA) +
+    annotate("rect", xmin = -4, xmax = 4, ymin = 0, ymax = -log10(p), fill = "grey80", alpha = 0.1, color = NA)
+
+term_js_volcano <- ggplot(subset(master.df, Mutant == mut), aes(x = Microarray_FC, y = -log10(term_lnorm_pvals), color = Point_Label, shape = as.factor(hasMotif))) +
+    geom_point() +
+    geom_vline(aes(xintercept = -0.5), lty = 2, lwd = 0.2) +
+    geom_vline(aes(xintercept = 0.5), lty = 2, lwd = 0.2) +
+    geom_hline(aes(yintercept = -log10(p)), lty = 2, lwd = 0.2) + 
+    scale_color_manual(breaks = c("Up", "Down", "Chrom", "Other"), values = c("#bf212f", "#264b96", "#006f3c", "grey80"), labels = c("Upregulated + Chrom", "Downregulated + Chrom", "Chrom", "Other")) +
+    theme_bw() +
+    geom_label_repel(data = subset(master.df, Mutant == mut & lnorm_pvals < p), aes(x = Microarray_FC, y = -log10(term_lnorm_pvals), label = Locus), label.padding = 0.1, show.legend = F, label.size = NA, fill = NA, max.overlaps = 15, force = 4, size = 2.75) +
+    theme(legend.position = "none", 
+          panel.grid = element_blank(),
+          plot.title = element_text(hjust = 0.5, face = "italic")) +
+    labs(y = "Termination Site Chromatin Change", x = "Expression log2FC", title = paste0(tolower(mut), "\u0394"), color = "", 
+         shape = "Motif") +
+    scale_shape_manual(labels = c("No", "Yes"), values = c(16, 17)) +
+    coord_cartesian(xlim = c(-4, 4), ylim = c(0, 14), expand = c(0,0)) + 
+    annotate("rect", xmin = -4, xmax = -e, ymin = -log10(p), ymax = 14, fill = "#264b96", alpha = 0.1, color = NA) + 
+    annotate("rect", xmin = e, xmax = 4, ymin = -log10(p), ymax = 14, fill = "#bf212f", alpha = 0.1, color = NA) + 
+    annotate("rect", xmin = -e, xmax = e, ymin = -log10(p), ymax = 14, fill = "#006f3c", alpha = 0.1, color = NA) +
+    annotate("rect", xmin = -4, xmax = 4, ymin = 0, ymax = -log10(p), fill = "grey80", alpha = 0.1, color = NA)
+
+patch <- window_js_volcano
+patch
+
+ggsave(patch, filename = paste0("/Users/kmoyung/Desktop/", mut, "_volcano.png"), dpi = 800, width = 4, height = 5)
+```
+
